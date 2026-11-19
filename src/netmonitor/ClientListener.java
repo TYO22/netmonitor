@@ -27,6 +27,9 @@ public interface ClientListener {
     /** Baris dari server yang bukan jawaban sebuah perintah (mis. pemberitahuan). */
     void onServerMessage(String line);
 
+    /** Pesan chat masuk dari server (BCAST / MSG) yang bukan jawaban perintah aktif. */
+    void onChatMessage(String line);
+
     /**
      * Koneksi terputus.
      *

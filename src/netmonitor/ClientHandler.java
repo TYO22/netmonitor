@@ -36,6 +36,8 @@ public class ClientHandler implements Runnable {
     private static final int AGENT_REPLY_TIMEOUT_MS = 5_000;
     private static final int PING_TIMEOUT_MS = 3_000;
     private static final int DNS_TIMEOUT_MS = 4_000;
+    private static final int MAX_BROADCAST_TEXT_LENGTH = 500;   // panjang maksimal teks BROADCAST
+    private static final int MAX_MSG_TEXT_LENGTH = 500;        // panjang maksimal teks MSG
 
     private final Socket socket;
     private final NetMonitorServer server;
@@ -274,6 +276,15 @@ public class ClientHandler implements Runnable {
             case "RESOLVE":
                 doResolve(p);
                 return true;
+            case "BROADCAST":
+                doBroadcast(p);
+                return true;
+            case "MSG":
+                doMsg(p);
+                return true;
+            case "EXEC":
+                doExec(p);
+                return true;
             default:
                 send(Protocol.err(400, "Perintah Tidak Dikenal"));
                 return true;
@@ -490,6 +501,43 @@ public class ClientHandler implements Runnable {
         }
     }
 
+    /**
+     * Meminta Agent menjalankan perintah EXEC (dipanggil dari thread Inspector).
+     * Server mengirim "REQ <id> EXEC <namaPerintah>", Agent membalas "RES <id> <data>".
+     *
+     * @param command   nama perintah yang sudah divalidasi whitelist
+     * @param timeoutMs batas waktu tunggu balasan Agent
+     * @return hasil eksekusi dari Agent
+     * @throws AgentException jika Agent gagal, timeout, atau terputus
+     */
+    private String requestExec(String command, long timeoutMs) throws AgentException {
+        String id = Long.toString(requestSeq.incrementAndGet());
+        CompletableFuture<String> future = new CompletableFuture<>();
+        pending.put(id, future);
+        try {
+            send("REQ " + id + " EXEC " + command);
+            String reply = future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            if (reply.startsWith("ERR")) {
+                throw new AgentException(500, "Agent Gagal Menjalankan Perintah (" + Protocol.clean(reply, 60) + ")");
+            }
+            return reply;
+        } catch (TimeoutException e) {
+            throw new AgentException(408, "Agent Tidak Merespons (waktu habis " + (timeoutMs / 1000)
+                    + " detik; jaringan Agent mungkin putus)");
+        } catch (CancellationException e) {
+            throw new AgentException(502, "Agent Terputus Saat Menunggu Respons");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AgentException(500, "Permintaan Dibatalkan");
+        } catch (ExecutionException e) {
+            throw new AgentException(500, "Kesalahan Saat Menunggu Agent");
+        } catch (IOException e) {
+            throw new AgentException(502, "Agent Terputus (gagal mengirim permintaan: " + describeIo(e) + ")");
+        } finally {
+            pending.remove(id);
+        }
+    }
+
     private void handleAgentResponse(String line) {
         String[] parts = line.split("\\s+", 3);
         CompletableFuture<String> f = parts.length >= 2 ? pending.get(parts[1]) : null;
@@ -498,5 +546,132 @@ public class ClientHandler implements Runnable {
             return;
         }
         f.complete(parts.length == 3 ? Protocol.clean(parts[2], 512) : "");
+    }
+
+    /**
+     * Menangani perintah BROADCAST: kirim pesan ke semua klien terhubung.
+     * Pengirim menerima 200 OK; tidak ada respons 404 pada broadcast.
+     *
+     * @param p token perintah, p[1..] adalah isi pesan
+     * @throws IOException jika gagal menulis respons ke pengirim
+     */
+    private void doBroadcast(String[] p) throws IOException {
+        if (username == null) {
+            send(Protocol.err(401, "Belum Login"));
+            return;
+        }
+        String text = joinFrom(p, 1);
+        if (text.length() > MAX_BROADCAST_TEXT_LENGTH) {
+            send(Protocol.err(400, "Pesan Terlalu Panjang (maksimal " + MAX_BROADCAST_TEXT_LENGTH + " karakter)"));
+            return;
+        }
+        String safeText = Protocol.clean(text, MAX_BROADCAST_TEXT_LENGTH);
+        String push = "BCAST " + username + " " + safeText;
+        for (ClientHandler h : server.getSessions().values()) {
+            if (h != this) {
+                h.trySend(push);
+            }
+        }
+        log.info("BROADCAST dari " + username + ": " + Protocol.clean(safeText, 80));
+        send(Protocol.ok("Pesan Dikirim"));
+    }
+
+    /**
+     * Menangani perintah MSG: kirim pesan privat ke satu klien.
+     * Jika target tidak terhubung, balas 404 ERR Pengguna Tidak Terhubung.
+     *
+     * @param p token perintah, p[1] target username, p[2..] isi pesan
+     * @throws IOException jika gagal menulis respons ke pengirim
+     */
+    private void doMsg(String[] p) throws IOException {
+        if (username == null) {
+            send(Protocol.err(401, "Belum Login"));
+            return;
+        }
+        if (p.length < 3) {
+            send(Protocol.err(400, "Format: MSG <username> <teks>"));
+            return;
+        }
+        String target = p[1];
+        String text = joinFrom(p, 2);
+        if (text.length() > MAX_MSG_TEXT_LENGTH) {
+            send(Protocol.err(400, "Pesan Terlalu Panjang (maksimal " + MAX_MSG_TEXT_LENGTH + " karakter)"));
+            return;
+        }
+        ClientHandler dest = server.getSessions().get(target);
+        if (dest == null) {
+            send(Protocol.err(404, "Pengguna Tidak Terhubung"));
+            return;
+        }
+        String safeText = Protocol.clean(text, MAX_MSG_TEXT_LENGTH);
+        dest.trySend("MSG " + username + " " + safeText);
+        log.info("MSG " + username + " -> " + target + ": " + Protocol.clean(safeText, 80));
+        send(Protocol.ok("Pesan Terkirim"));
+    }
+
+    /**
+     * Menangani perintah EXEC (khusus Inspector): memvalidasi whitelist dan meneruskan ke Agent.
+     * Server menunggu balasan Agent paling lama 12 detik.
+     *
+     * @param p token perintah, p[1] agentId, p[2] nama perintah
+     * @throws IOException jika gagal menulis respons
+     */
+    private void doExec(String[] p) throws IOException {
+        if (!requireInspector()) {
+            return;
+        }
+        if (p.length != 3) {
+            send(Protocol.err(400, "Format: EXEC <agentId> <namaPerintah>"));
+            return;
+        }
+        String agentId = p[1];
+        String command = p[2].toLowerCase();
+        if (!isAllowedExecCommand(command)) {
+            send(Protocol.err(403, "Perintah Tidak Diizinkan (di luar whitelist)"));
+            return;
+        }
+        ClientHandler agent = server.getSessions().get(agentId);
+        if (agent == null || !agent.isAgent()) {
+            send(Protocol.err(404, "Agent Tidak Ditemukan (tidak terhubung; periksa daftar dengan LIST)"));
+            return;
+        }
+        try {
+            String data = agent.requestExec(command, 12_000);
+            send(Protocol.ok("EXEC " + agentId + " " + data));
+        } catch (AgentException e) {
+            send(Protocol.err(e.code, e.getMessage()));
+        }
+    }
+
+    /**
+     * Memeriksa apakah nama perintah termasuk whitelist eksekusi jarak jauh.
+     *
+     * @param command nama perintah (huruf kecil)
+     * @return true jika diizinkan
+     */
+    private static boolean isAllowedExecCommand(String command) {
+        return "hostname".equals(command) || "whoami".equals(command) || "ipconfig".equals(command)
+                || "ifconfig".equals(command) || "tasklist".equals(command) || "ps".equals(command);
+    }
+
+    /**
+     * Menggabungkan token mulai indeks tertentu menjadi satu teks.
+     *
+     * @param p     token hasil split
+     * @param start indeks awal
+     * @return teks gabungan (dipangkas spasi di tepi)
+     */
+    private static String joinFrom(String[] p, int start) {
+        if (p == null || start >= p.length) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = start; i < p.length; i++) {
+            if (i > start) {
+                sb.append(' ');
+            }
+            sb.append(p[i]);
+        }
+        return sb.toString().trim();
     }
 }

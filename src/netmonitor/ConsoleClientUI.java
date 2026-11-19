@@ -141,11 +141,15 @@ public final class ConsoleClientUI implements ClientListener {
         if (!engine.connect()) {
             return 1;
         }
-        System.out.println("Perintah: LIST | SYSINFO <agentId> | PING <host> | RESOLVE <domain> | QUIT");
+        System.out.println("Perintah: LIST | SYSINFO <agentId> | PING <host> | RESOLVE <domain> | BROADCAST <teks> | MSG <username> <teks> | EXEC <agentId> <namaPerintah> | QUIT");
         while (true) {
             System.out.print("netmonitor> ");
             String cmd = STDIN.hasNextLine() ? STDIN.nextLine().trim() : "QUIT";
             if (cmd.isEmpty()) {
+                continue;
+            }
+            if (cmd.equalsIgnoreCase("HELP")) {
+                showHelp();
                 continue;
             }
             ClientEngine.Result r = engine.request(cmd);
@@ -179,7 +183,14 @@ public final class ConsoleClientUI implements ClientListener {
         switch (resp.substring(0, 3)) {
             case "400": hint = "Perintah/argumen salah atau tidak lengkap. Periksa format perintah."; break;
             case "401": hint = "Belum login atau kredensial salah."; break;
-            case "403": hint = "Perintah ini hanya boleh dipakai peran INSPECTOR."; break;
+            case "403":
+                // Perbedaan penyebab 403: biar pengguna pikir ANEH mesin tersebut
+                // terjal Rank sampai server menjawab.
+                String m = resp.toLowerCase();
+                hint = m.contains("whitelist")
+                        ? "Perintah ini tidak ada dalam daftar perintah yang diizinkan (whitelist); tidak dapat dijalankan."
+                        : "Perintah ini hanya boleh dipakai peran INSPECTOR.";
+                break;
             case "404": hint = "Yang diminta tidak ditemukan (agent tidak terhubung atau domain tidak dikenal)."; break;
             case "408": hint = "Waktu habis: target atau layanan tidak menjawab tepat waktu."; break;
             case "500": hint = "Terjadi kesalahan di server atau di Agent."; break;
@@ -219,6 +230,12 @@ public final class ConsoleClientUI implements ClientListener {
     }
 
     @Override
+    public void onChatMessage(String line) {
+        // Pesan chat masuk (BCAST / MSG): tampilkan di bawah prompt tanpa menghapus input pengguna.
+        System.out.println("[Chat] " + line);
+    }
+
+    @Override
     public void onConnectionLost(String reason, boolean willReconnect, boolean byServer) {
         if (willReconnect) {
             System.out.println("[KONEKSI TERPUTUS] Agent kehilangan koneksi ke server: " + reason + ".");
@@ -237,5 +254,18 @@ public final class ConsoleClientUI implements ClientListener {
     public void onReconnecting(int attempt, int maxAttempts, long delayMs) {
         System.out.println("Mencoba menyambung ulang dalam " + (delayMs / 1000.0) + " detik (percobaan "
                 + attempt + "/" + maxAttempts + "). Ketik 'quit' atau 'exit' untuk berhenti.");
+    }
+
+    public void showHelp() {
+        System.out.println("\nPerintah yang tersedia:");
+        System.out.println("  LOGIN <role> <user> <pass>");
+        System.out.println("  LIST");
+        System.out.println("  SYSINFO <agentId>");
+        System.out.println("  PING <host>");
+        System.out.println("  RESOLVE <domain>");
+        System.out.println("  BROADCAST <teks>");
+        System.out.println("  MSG <username> <teks>");
+        System.out.println("  EXEC <agentId> <namaPerintah>");
+        System.out.println("  QUIT / EXIT");
     }
 }

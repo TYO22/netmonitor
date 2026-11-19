@@ -521,6 +521,12 @@ public final class ClientEngine {
                     }
                     continue;
                 }
+                // Push chat (BCAST/MSG) diteruskan langsung ke tampilan, bukan ke antrean jawaban perintah,
+                // walaupun sedang ada perintah aktif (awaiting = true).
+                if (line.startsWith("BCAST ") || line.startsWith("MSG ")) {
+                    ui.onChatMessage(line);
+                    continue;
+                }
                 if (line.startsWith("503 ERR Server Dimatikan")) {
                     serverNotice = "server dimatikan oleh administrator";
                 } else if (line.startsWith("408 ERR Sesi Timeout")) {
@@ -561,19 +567,79 @@ public final class ClientEngine {
 
     // ------------------------------------------------------------------ mode AGENT
 
-    /** Menjawab permintaan server: "REQ <id> SYSINFO" dibalas "RES <id> <data>". */
+    /** Menjawab permintaan server: "REQ <id> SYSINFO" dibalas "RES <id> <data>",
+     *  "REQ <id> EXEC <perintah>" dibalas "RES <id> <hasil>" (khusus Agent). */
     private void answerRequest(Connection c, String line) {
         String[] p = line.split("\\s+");
         String id = p.length > 1 ? p[1] : "0";
         try {
             if (p.length >= 3 && p[2].equals("SYSINFO")) {
                 c.send("RES " + id + " " + collectSysinfo());
+            } else if (p.length >= 4 && p[2].equals("EXEC")) {
+                c.send("RES " + id + " " + collectExecOutput(p[3]));
             } else {
                 c.send("RES " + id + " ERR perintah_tidak_dikenal");
             }
         } catch (IOException e) {
             c.markLost(describeIo(e));
         }
+    }
+
+    /**
+     * Mengeksekusi perintah whitelist di sisi Agent (HANYA di ClientEngine/Agent).
+     * Eksekusi tanpa shell: nama perintah dipanggil lewat ProcessBuilder langsung.
+     * Output dipotong 4 KB, diencode satu baris (spasi / karakter kontrol → spasi).
+     *
+     * @param command nama perintah yang sudah divalidasi server-side
+     * @return hasil eksekusi (satu baris), atau "ERR <penyebab>" bila gagal
+     */
+    private static String collectExecOutput(String command) {
+        StringBuilder sb = new StringBuilder();
+        ProcessBuilder pb = new ProcessBuilder(command);
+        pb.redirectErrorStream(true);
+        Process proc;
+        try {
+            proc = pb.start();
+        } catch (IOException e) {
+            return "ERR gagal_memulai_perintah: " + Protocol.clean(e.getMessage(), 60);
+        }
+        final Process p = proc;
+        Thread reader = new Thread(() -> {
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String l;
+                while ((l = br.readLine()) != null) {
+                    if (sb.length() > 0) {
+                        sb.append("\\n");
+                    }
+                    sb.append(l);
+                    if (sb.length() >= 4_096) {
+                        break;
+                    }
+                }
+            } catch (IOException ignored) {
+                // kesalahan membaca output
+            }
+        });
+        reader.setDaemon(true);
+        reader.start();
+        try {
+            boolean finished = proc.waitFor(10, TimeUnit.SECONDS);
+            if (!finished) {
+                proc.destroyForcibly();
+                proc.waitFor();
+                return "ERR waktu_habis_10_detik";
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            proc.destroyForcibly();
+            return "ERR dibatalkan";
+        }
+        try {
+            reader.join(2_000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return Protocol.clean(sb.toString(), 4_096);
     }
 
     @SuppressWarnings("deprecation")
