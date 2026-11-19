@@ -1,0 +1,9 @@
+# Hasil kompilasi & log runtime
+out/
+*.class
+*.log
+
+# Dokumen internal perencanaan & pengujian otomatis
+AGENTS.md
+docs/
+tests/
