@@ -141,7 +141,7 @@ public final class ConsoleClientUI implements ClientListener {
         if (!engine.connect()) {
             return 1;
         }
-        System.out.println("Perintah: LIST | SYSINFO <agentId> | PING <host> | RESOLVE <domain> | BROADCAST <teks> | MSG <username> <teks> | EXEC <agentId> <namaPerintah> | QUIT");
+        System.out.println("Perintah: LIST | SYSINFO <agentId> | PING <host> | RESOLVE <domain> | BROADCAST <teks> | MSG <username> <teks> | EXEC <agentId> <namaPerintah> | SUBSCRIBE <udpPort> | UNSUBSCRIBE | WATCH | QUIT");
         while (true) {
             System.out.print("netmonitor> ");
             String cmd = STDIN.hasNextLine() ? STDIN.nextLine().trim() : "QUIT";
@@ -157,6 +157,23 @@ public final class ConsoleClientUI implements ClientListener {
                 case OK:
                     System.out.println(r.line);
                     printHint(r.line);
+                    // Buka socket UDP lokal setelah SUBSCRIBE berhasil (logika soket di ClientEngine, bukan UI).
+                    String first = cmd.trim().split("\\s+")[0].toUpperCase();
+                    if (first.equals("SUBSCRIBE")) {
+                        String[] toks = cmd.trim().split("\\s+");
+                        if (toks.length == 2) {
+                            try {
+                                int port = Integer.parseInt(toks[1]);
+                                if (engine.subscribeTelemetry(port)) {
+                                    System.out.println("  Telemetri UDP aktif di port " + port + ".");
+                                }
+                            } catch (NumberFormatException ignored) {
+                                // port tidak valid; server sudah menolak
+                            }
+                        }
+                    } else if (first.equals("UNSUBSCRIBE")) {
+                        engine.unsubscribeTelemetry();
+                    }
                     if (r.quitting) {
                         engine.close();
                         return 0;
@@ -236,6 +253,14 @@ public final class ConsoleClientUI implements ClientListener {
     }
 
     @Override
+    public void onTelemetry(String agentId, double cpuLoad, double memPercent, int seqNum) {
+        // Telemetri UDP dari server: ringkasan singkat di konsol Inspector.
+        System.out.println(String.format(java.util.Locale.US,
+                "[Telemetry] %s: CPU %.2f%% | Mem %.2f%% (seq %d)",
+                agentId, cpuLoad * 100.0, memPercent, seqNum));
+    }
+
+    @Override
     public void onConnectionLost(String reason, boolean willReconnect, boolean byServer) {
         if (willReconnect) {
             System.out.println("[KONEKSI TERPUTUS] Agent kehilangan koneksi ke server: " + reason + ".");
@@ -266,6 +291,9 @@ public final class ConsoleClientUI implements ClientListener {
         System.out.println("  BROADCAST <teks>");
         System.out.println("  MSG <username> <teks>");
         System.out.println("  EXEC <agentId> <namaPerintah>");
+        System.out.println("  SUBSCRIBE <udpPort>   (mulai terima telemetri UDP)");
+        System.out.println("  UNSUBSCRIBE           (berhenti terima telemetri UDP)");
+        System.out.println("  WATCH                 (metrik terakhir semua Agent)");
         System.out.println("  QUIT / EXIT");
     }
 }

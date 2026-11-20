@@ -1,7 +1,7 @@
 # NetMonitor Enterprise — Kelompok 2, Pemrograman Jaringan (TIS31263)
 
 Aplikasi client-server TCP berbasis Java untuk memantau node (Agent) dari satu konsol (Inspector).
-Status: **tahap komunikasi dan remote command selesai** (lihat `docs/PRD_NetMonitor_Final.md` untuk rencana, keputusan desain, dan to-do).
+Status: **tahap komunikasi, remote command, dan telemetri UDP selesai** (lihat `docs/PRD_NetMonitor_Final.md` untuk rencana, keputusan desain, dan to-do).
 
 ## Struktur
 ```
@@ -35,6 +35,7 @@ Di VS Code gunakan tombol **Run Java** (bukan Code Runner). Akun bawaan: `admin/
 - Klien dipisah: `ClientEngine` (mesin jaringan, tanpa UI) + `ConsoleClientUI` (tampilan) agar GUI web dapat memakai mesin yang sama.
 - `BROADCAST` dan `MSG` (Pilar 2, D8): pesan ke semua klien dan privat antar pengguna, batas 500 karakter, push `BCAST`/`MSG` diteruskan ke listener tanpa tertukar dengan jawaban perintah.
 - `EXEC` (D9): remote command khusus Inspector; server memvalidasi whitelist dan meneruskan ke Agent (timeout server 12 dtk); Agent menjalankan perintah whitelist via `ProcessBuilder` tanpa shell (timeout eksekusi 10 dtk, output 4 KB satu baris).
+- Telemetri UDP (D10/D11): `TelemetryService` di server menerima datagram UDP dari Agent, menyimpan metrik per Agent, fan-out ke Inspector lewat `SUBSCRIBE <udpPort>`, deteksi stale dan perintah `WATCH`.
 
 ## Pengujian otomatis
 ```

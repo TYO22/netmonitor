@@ -54,6 +54,8 @@ public class NetMonitorServer {
         return t;
     });
 
+    private final TelemetryService telemetry;
+
     private ServerSocket serverSocket;
     private volatile boolean running;
 
@@ -62,6 +64,7 @@ public class NetMonitorServer {
         this.log = log;
         this.auth = new AuthService(System.getProperty("netmonitor.users", "users.properties"), log);
         this.geo = new GeoIpService(log);
+        this.telemetry = new TelemetryService(log);
     }
 
     public FileLogger getLogger() {
@@ -74,6 +77,11 @@ public class NetMonitorServer {
 
     public GeoIpService getGeo() {
         return geo;
+    }
+
+    /** Layanan telemetri UDP (menerima dari Agent, fan-out ke Inspector). */
+    public TelemetryService getTelemetry() {
+        return telemetry;
     }
 
     public ConcurrentHashMap<String, ClientHandler> getSessions() {
@@ -95,6 +103,7 @@ public class NetMonitorServer {
         log.info("Server NetMonitor aktif di port " + port + " (thread pool " + MAX_CLIENTS + " klien, heartbeat "
                 + HB_INTERVAL_S + " dtk, batas diam " + HB_TIMEOUT_S + " dtk)");
         heartbeat.scheduleWithFixedDelay(this::checkSessions, HB_INTERVAL_S, HB_INTERVAL_S, TimeUnit.SECONDS);
+        telemetry.start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(this::stop, "ShutdownHook"));
 
@@ -173,6 +182,7 @@ public class NetMonitorServer {
             // abaikan
         }
         heartbeat.shutdownNow();
+        telemetry.stop();
         // beri tahu klien alasan koneksi ditutup, bukan sekadar memutusnya
         for (ClientHandler h : handlers) {
             h.notifyAndClose(Protocol.err(503, "Server Dimatikan"));

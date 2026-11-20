@@ -136,6 +136,7 @@ public class ClientHandler implements Runnable {
         String user = username;
         if (user != null) {
             server.getSessions().remove(user, this);
+            server.getTelemetry().unsubscribe(user);
         }
         for (CompletableFuture<String> f : pending.values()) {
             f.cancel(true);
@@ -284,6 +285,15 @@ public class ClientHandler implements Runnable {
                 return true;
             case "EXEC":
                 doExec(p);
+                return true;
+            case "SUBSCRIBE":
+                doSubscribe(p);
+                return true;
+            case "UNSUBSCRIBE":
+                doUnsubscribe();
+                return true;
+            case "WATCH":
+                doWatch();
                 return true;
             default:
                 send(Protocol.err(400, "Perintah Tidak Dikenal"));
@@ -652,6 +662,79 @@ public class ClientHandler implements Runnable {
     private static boolean isAllowedExecCommand(String command) {
         return "hostname".equals(command) || "whoami".equals(command) || "ipconfig".equals(command)
                 || "ifconfig".equals(command) || "tasklist".equals(command) || "ps".equals(command);
+    }
+
+    /**
+     * Mendaftarkan Inspector untuk menerima fan-out telemetri UDP.
+     * Inspector mengirim port UDP lokalnya; server mengirim datagram ke alamat IP klien TCP pada port tersebut.
+     *
+     * @param p token perintah, p[1] adalah port UDP lokal Inspector
+     * @throws IOException jika gagal menulis respons
+     */
+    private void doSubscribe(String[] p) throws IOException {
+        if (!requireInspector()) {
+            return;
+        }
+        if (p.length != 2) {
+            send(Protocol.err(400, "Format: SUBSCRIBE <udpPort>"));
+            return;
+        }
+        int udpPort;
+        try {
+            udpPort = Integer.parseInt(p[1]);
+            if (udpPort < 1 || udpPort > 65535) {
+                throw new NumberFormatException();
+            }
+        } catch (NumberFormatException e) {
+            send(Protocol.err(400, "Port UDP Tidak Valid"));
+            return;
+        }
+        server.getTelemetry().subscribe(username, socket.getInetAddress(), udpPort);
+        send(Protocol.ok("SUBSCRIBED " + udpPort));
+    }
+
+    /**
+     * Membatalkan langganan telemetri UDP Inspector.
+     *
+     * @throws IOException jika gagal menulis respons
+     */
+    private void doUnsubscribe() throws IOException {
+        if (!requireInspector()) {
+            return;
+        }
+        server.getTelemetry().unsubscribe(username);
+        send(Protocol.ok("UNSUBSCRIBED"));
+    }
+
+    /**
+     * Menampilkan metrik telemetri terakhir untuk semua Agent.
+     * Agent yang melewati ambang batas stale ditandai STALE.
+     *
+     * @throws IOException jika gagal menulis respons
+     */
+    private void doWatch() throws IOException {
+        if (!requireInspector()) {
+            return;
+        }
+        java.util.Map<String, TelemetryService.AgentMetrics> map = server.getTelemetry().getMetrics();
+        if (map.isEmpty()) {
+            send(Protocol.ok("WATCH []"));
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        java.util.List<TelemetryService.AgentMetrics> list = new java.util.ArrayList<>(map.values());
+        list.sort(java.util.Comparator.comparing(m -> m.agentId == null ? "" : m.agentId));
+        for (int i = 0; i < list.size(); i++) {
+            TelemetryService.AgentMetrics m = list.get(i);
+            if (i > 0) {
+                sb.append(" ; ");
+            }
+            String status = m.stale ? "STALE" : "OK";
+            sb.append(m.agentId).append(" cpu=").append(String.format(java.util.Locale.US, "%.2f", m.cpuLoad * 100.0))
+              .append("% mem=").append(String.format(java.util.Locale.US, "%.2f", m.memPercent))
+              .append("% seq=").append(m.seqNum).append(" status=").append(status);
+        }
+        send(Protocol.ok("WATCH [" + sb.toString() + "]"));
     }
 
     /**

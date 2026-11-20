@@ -31,6 +31,16 @@ public interface ClientListener {
     void onChatMessage(String line);
 
     /**
+     * Telemetri UDP yang diteruskan server ke Inspector.
+     *
+     * @param agentId    identitas Agent
+     * @param cpuLoad    beban CPU (0.0 - 1.0, -1.0 bila tidak tersedia)
+     * @param memPercent persentase penggunaan memori (0 - 100)
+     * @param seqNum     nomor urut paket (untuk mendeteksi celah)
+     */
+    void onTelemetry(String agentId, double cpuLoad, double memPercent, int seqNum);
+
+    /**
      * Koneksi terputus.
      *
      * @param reason        penyebab yang sudah berupa kalimat mudah dibaca

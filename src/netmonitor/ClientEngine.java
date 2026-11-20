@@ -7,6 +7,8 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.lang.management.ManagementFactory;
 import java.net.ConnectException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NoRouteToHostException;
@@ -16,9 +18,12 @@ import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
@@ -44,11 +49,22 @@ public final class ClientEngine {
     private static final int RECONNECT_ATTEMPTS = Integer.getInteger("netmonitor.reconnect.attempts", 20);
     private static final long RECONNECT_DELAY_MS = Long.getLong("netmonitor.reconnect.delay", 3000L);
     private static final String LOST = "\u0000LOST";         // penanda internal di antrean jawaban
+    private static final long TELEMETRY_INTERVAL_MS = 2100L; // kirim telemetri tiap ±2 detik
+    private static final int HELLO_MAX_ATTEMPTS = 3;         // retransmisi datagram kontrol
+    private static final int ACK_TIMEOUT_MS = 500;           // setSoTimeout untuk menunggu ACK
 
     private final ClientConfig cfg;
     private final ClientListener ui;
     private volatile boolean quitRequested;
     private volatile Connection current;
+
+    // Telemetri UDP: sisi Agent (pengirim) dan sisi Inspector (penerima fan-out).
+    private DatagramSocket udpSendSocket;
+    private DatagramSocket telemetrySocket;
+    private Thread telemetryReceiver;
+    private volatile boolean telemetryReceiving;
+    private volatile ScheduledExecutorService telemetryScheduler;
+    private final AtomicInteger telemetrySeq = new AtomicInteger();
 
     public ClientEngine(ClientConfig cfg, ClientListener ui) {
         this.cfg = cfg;
@@ -205,6 +221,7 @@ public final class ClientEngine {
                 current = c;
                 final Connection conn = c;
                 c.startReader(line -> answerRequest(conn, line), reason -> { /* ditangani oleh loop ini */ });
+                startTelemetrySender();
                 try {
                     c.lostLatch.await();
                 } catch (InterruptedException e) {
@@ -221,6 +238,7 @@ public final class ClientEngine {
                 }
             } finally {
                 current = null;
+                stopTelemetrySender();
                 if (c != null) {
                     c.close();
                 }
@@ -248,6 +266,7 @@ public final class ClientEngine {
     /** Pengguna meminta berhenti (Agent): kirim QUIT bila masih terhubung dan hentikan sambung ulang. */
     public void requestQuit() {
         quitRequested = true;
+        stopTelemetrySender();
         Connection c = current;
         if (c != null && !c.lost) {
             c.userQuit = true;
@@ -562,6 +581,153 @@ public final class ClientEngine {
                 // sudah tertutup
             }
             closeQuietly(socket);
+        }
+    }
+
+    // ------------------------------------------------------------------ telemetri UDP (Agent)
+
+    /** Memulai pengirim telemetri UDP pada sisi Agent. */
+    public void startTelemetrySender() {
+        if (udpSendSocket != null && !udpSendSocket.isClosed()) {
+            return; // sudah berjalan
+        }
+        stopTelemetrySender(); // tutup lama jika ada
+        try {
+            udpSendSocket = new DatagramSocket();
+            InetAddress serverAddr = InetAddress.getByName(cfg.getHost());
+            int serverUdpPort = Integer.getInteger("netmonitor.udp.port", TelemetryService.DEFAULT_UDP_PORT);
+            sendHelloWithRetry(udpSendSocket, serverAddr, serverUdpPort);
+            telemetryScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "telemetry-sender");
+                t.setDaemon(true);
+                return t;
+            });
+            telemetryScheduler.scheduleAtFixedRate(() -> sendTelemetryPacket(udpSendSocket, serverAddr, serverUdpPort),
+                    TELEMETRY_INTERVAL_MS, TELEMETRY_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        } catch (IOException | RuntimeException e) {
+            ui.onError("Telemetri UDP tidak dapat dimulai: " + e.getMessage());
+            udpSendSocket = null;
+        }
+    }
+
+    /** Menghentikan pengirim telemetri UDP. */
+    public void stopTelemetrySender() {
+        ScheduledExecutorService s = telemetryScheduler;
+        telemetryScheduler = null;
+        if (s != null) {
+            s.shutdownNow();
+        }
+        if (udpSendSocket != null && !udpSendSocket.isClosed()) {
+            udpSendSocket.close();
+            udpSendSocket = null;
+        }
+    }
+
+    /**
+     * Mendaftarkan port UDP lokal untuk menerima telemetri dari server (khusus Inspector).
+     *
+     * @param localUdpPort port UDP yang dibuka secara lokal
+     * @return true bila berhasil, false bila gagal
+     */
+    public boolean subscribeTelemetry(int localUdpPort) {
+        unsubscribeTelemetry();
+        try {
+            telemetrySocket = new DatagramSocket(localUdpPort);
+            telemetrySocket.setSoTimeout(1000);
+        } catch (IOException e) {
+            ui.onError("Gagal membuka port UDP " + localUdpPort + ": " + e.getMessage());
+            return false;
+        }
+        telemetryReceiving = true;
+        telemetryReceiver = new Thread(() -> {
+            byte[] buf = new byte[512];
+            while (telemetryReceiving) {
+                DatagramPacket pk = new DatagramPacket(buf, buf.length);
+                try {
+                    telemetrySocket.receive(pk);
+                } catch (SocketTimeoutException e) {
+                    continue;
+                } catch (IOException e) {
+                    if (telemetryReceiving) {
+                        ui.onError("Penerimaan telemetri terputus: " + describeIo(e));
+                    }
+                    break;
+                }
+                String text = new String(pk.getData(), 0, pk.getLength(), StandardCharsets.UTF_8).trim();
+                String[] p = text.split("\\s+");
+                if (p.length >= 5 && "TEL".equalsIgnoreCase(p[0])) {
+                    try {
+                        String agentId = p[1];
+                        int seq = Integer.parseInt(p[2]);
+                        double cpu = Double.parseDouble(p[3]);
+                        double mem = Double.parseDouble(p[4]);
+                        ui.onTelemetry(agentId, cpu, mem, seq);
+                    } catch (NumberFormatException ignored) {
+                        // abaikan datagram tidak valid
+                    }
+                }
+            }
+        }, "telemetry-receiver");
+        telemetryReceiver.setDaemon(true);
+        telemetryReceiver.start();
+        return true;
+    }
+
+    /** Menghentikan pendaftaran telemetri (khusus Inspector). */
+    public void unsubscribeTelemetry() {
+        telemetryReceiving = false;
+        Thread t = telemetryReceiver;
+        telemetryReceiver = null;
+        if (t != null) {
+            t.interrupt();
+        }
+        DatagramSocket s = telemetrySocket;
+        telemetrySocket = null;
+        if (s != null && !s.isClosed()) {
+            s.close();
+        }
+    }
+
+    /**
+     * Mengirim datagram HELLO ke server UDP dengan mekanisme retransmisi (ACK + setSoTimeout(500), maks 3×).
+     */
+    private void sendHelloWithRetry(DatagramSocket sock, InetAddress serverAddr, int serverUdpPort) throws IOException {
+        int seq = telemetrySeq.incrementAndGet();
+        byte[] data = ("HELLO " + cfg.getUsername() + " " + seq).getBytes(StandardCharsets.UTF_8);
+        for (int attempt = 1; attempt <= HELLO_MAX_ATTEMPTS; attempt++) {
+            sock.send(new DatagramPacket(data, data.length, serverAddr, serverUdpPort));
+            sock.setSoTimeout(ACK_TIMEOUT_MS);
+            byte[] buf = new byte[128];
+            DatagramPacket pk = new DatagramPacket(buf, buf.length);
+            try {
+                sock.receive(pk);
+                String resp = new String(pk.getData(), 0, pk.getLength(), StandardCharsets.UTF_8).trim();
+                if (resp.equals("ACK " + seq)) {
+                    return; // ACK diterima, selesai
+                }
+            } catch (SocketTimeoutException ignored) {
+                // timeout; coba lagi
+            }
+        }
+        throw new IOException("HELLO tidak di-ACK oleh server setelah " + HELLO_MAX_ATTEMPTS + " percobaan");
+    }
+
+    /**
+     * Mengirim datagram TEL ke server UDP (fire-and-forget, tanpa menunggu ACK).
+     */
+    private void sendTelemetryPacket(DatagramSocket sock, InetAddress serverAddr, int serverUdpPort) {
+        try {
+            com.sun.management.OperatingSystemMXBean os = (com.sun.management.OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
+            double cpu = os.getCpuLoad();
+            long total = os.getTotalMemorySize();
+            long free = os.getFreeMemorySize();
+            double mem = total > 0 ? ((total - free) * 100.0 / total) : 0.0;
+            int seq = telemetrySeq.incrementAndGet();
+            String payload = "TEL " + cfg.getUsername() + " " + seq + " " + cpu + " " + mem;
+            byte[] data = payload.getBytes(StandardCharsets.UTF_8);
+            sock.send(new DatagramPacket(data, data.length, serverAddr, serverUdpPort));
+        } catch (IOException | RuntimeException ignored) {
+            // telemetri toleran hilang; jangan ganggu Agent
         }
     }
 
