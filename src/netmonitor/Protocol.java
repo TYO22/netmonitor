@@ -48,6 +48,24 @@ public final class Protocol {
         return ROLE_AGENT.equals(role) || ROLE_INSPECTOR.equals(role);
     }
 
+    /**
+     * Memeriksa apakah sebuah nama berkas aman dipakai pada transfer berkas.
+     * Nama ditolak bila kosong, mengandung pemisah direktori ({@code /} atau {@code \}),
+     * atau mengandung rangkaian dua titik ({@code ..}) yang dapat dipakai untuk path traversal.
+     *
+     * @param name nama berkas yang akan diperiksa
+     * @return true bila nama berkas aman
+     */
+    public static boolean isSafeFilename(String name) {
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        if (name.contains("/") || name.contains("\\")) {
+            return false;
+        }
+        return !name.contains("..");
+    }
+
     /** Respons sukses, contoh: ok("BYE Sesi Berhasil Ditutup") -> "200 BYE Sesi Berhasil Ditutup". */
     public static String ok(String text) {
         return "200 " + text;

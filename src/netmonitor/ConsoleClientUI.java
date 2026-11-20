@@ -141,7 +141,7 @@ public final class ConsoleClientUI implements ClientListener {
         if (!engine.connect()) {
             return 1;
         }
-        System.out.println("Perintah: LIST | SYSINFO <agentId> | PING <host> | RESOLVE <domain> | BROADCAST <teks> | MSG <username> <teks> | EXEC <agentId> <namaPerintah> | SUBSCRIBE <udpPort> | UNSUBSCRIBE | WATCH | QUIT");
+        System.out.println("Perintah: LIST | SYSINFO <agentId> | PING <host> | RESOLVE <domain> | BROADCAST <teks> | MSG <username> <teks> | EXEC <agentId> <namaPerintah> | UPLOAD <pathLokal> | PUSH <agentId> <namaBerkas> | SUBSCRIBE <udpPort> | UNSUBSCRIBE | WATCH | QUIT");
         while (true) {
             System.out.print("netmonitor> ");
             String cmd = STDIN.hasNextLine() ? STDIN.nextLine().trim() : "QUIT";
@@ -152,13 +152,20 @@ public final class ConsoleClientUI implements ClientListener {
                 showHelp();
                 continue;
             }
+            String first = cmd.trim().split("\\s+")[0].toUpperCase();
+            if ("UPLOAD".equals(first)) {
+                ClientEngine.Result rup = engine.requestUpload(cmd);
+                if (rup.line != null) {
+                    System.out.println(rup.line);
+                }
+                continue;
+            }
             ClientEngine.Result r = engine.request(cmd);
             switch (r.status) {
                 case OK:
                     System.out.println(r.line);
                     printHint(r.line);
                     // Buka socket UDP lokal setelah SUBSCRIBE berhasil (logika soket di ClientEngine, bukan UI).
-                    String first = cmd.trim().split("\\s+")[0].toUpperCase();
                     if (first.equals("SUBSCRIBE")) {
                         String[] toks = cmd.trim().split("\\s+");
                         if (toks.length == 2) {
@@ -260,6 +267,23 @@ public final class ConsoleClientUI implements ClientListener {
                 agentId, cpuLoad * 100.0, memPercent, seqNum));
     }
 
+    /**
+     * Menampilkan progres transfer berkas biner di konsol Inspector/Agent.
+     *
+     * @param direction      "UPLOAD" atau "PUSH"
+     * @param bytesTransferred jumlah byte yang sudah diproses
+     * @param totalExpected  total byte yang diharapkan (0 bila tidak diketahui)
+     */
+    @Override
+    public void onTransferProgress(String direction, long bytesTransferred, long totalExpected) {
+        double percent = totalExpected > 0 ? (double) bytesTransferred / totalExpected * 100.0 : 0.0;
+        System.out.printf("\r[Transfer %s] %d/%d byte (%.1f%%)",
+                direction, bytesTransferred, totalExpected, percent);
+        if (percent >= 100.0) {
+            System.out.println();
+        }
+    }
+
     @Override
     public void onConnectionLost(String reason, boolean willReconnect, boolean byServer) {
         if (willReconnect) {
@@ -291,6 +315,8 @@ public final class ConsoleClientUI implements ClientListener {
         System.out.println("  BROADCAST <teks>");
         System.out.println("  MSG <username> <teks>");
         System.out.println("  EXEC <agentId> <namaPerintah>");
+        System.out.println("  UPLOAD <pathLokal>     (unggah berkas patch ke server)");
+        System.out.println("  PUSH <agentId> <namaBerkas> (kirim patch ke Agent)");
         System.out.println("  SUBSCRIBE <udpPort>   (mulai terima telemetri UDP)");
         System.out.println("  UNSUBSCRIBE           (berhenti terima telemetri UDP)");
         System.out.println("  WATCH                 (metrik terakhir semua Agent)");

@@ -41,6 +41,15 @@ public interface ClientListener {
     void onTelemetry(String agentId, double cpuLoad, double memPercent, int seqNum);
 
     /**
+     * Pembaruan progres transfer berkas biner (UPLOAD atau PUSH).
+     *
+     * @param direction      "UPLOAD" atau "PUSH"
+     * @param bytesTransferred jumlah byte yang sudah diproses
+     * @param totalExpected  total byte yang diharapkan (0 bila tidak diketahui)
+     */
+    void onTransferProgress(String direction, long bytesTransferred, long totalExpected);
+
+    /**
      * Koneksi terputus.
      *
      * @param reason        penyebab yang sudah berupa kalimat mudah dibaca

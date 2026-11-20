@@ -30,8 +30,13 @@ public class NetMonitorServer {
     private static final long HB_INTERVAL_S = Long.getLong("netmonitor.heartbeat.interval", 10L);
     private static final long HB_TIMEOUT_S = Long.getLong("netmonitor.heartbeat.timeout", 30L);
     private static final long INSPECTOR_IDLE_S = Long.getLong("netmonitor.inspector.idle", 600L);
+    // Data channel configuration
+    private static final int DATA_PORT_DEFAULT = Integer.getInteger("netmonitor.data.port", 9092);
+    private static final String UPLOADS_DIR_DEFAULT = System.getProperty("netmonitor.uploads.dir", "uploads");
 
     private final int port;
+    private final int dataPort;
+    private final String uploadsDir;
     private final FileLogger log;
     private final AuthService auth;
     private final GeoIpService geo;
@@ -55,16 +60,20 @@ public class NetMonitorServer {
     });
 
     private final TelemetryService telemetry;
+    private final DataTransferService dataTransfer;
 
     private ServerSocket serverSocket;
     private volatile boolean running;
 
     public NetMonitorServer(int port, FileLogger log) {
         this.port = port;
+        this.dataPort = DATA_PORT_DEFAULT;
+        this.uploadsDir = UPLOADS_DIR_DEFAULT;
         this.log = log;
         this.auth = new AuthService(System.getProperty("netmonitor.users", "users.properties"), log);
         this.geo = new GeoIpService(log);
         this.telemetry = new TelemetryService(log);
+        this.dataTransfer = new DataTransferService(dataPort, uploadsDir, log);
     }
 
     public FileLogger getLogger() {
@@ -82,6 +91,21 @@ public class NetMonitorServer {
     /** Layanan telemetri UDP (menerima dari Agent, fan-out ke Inspector). */
     public TelemetryService getTelemetry() {
         return telemetry;
+    }
+
+    /** Layanan kanal data TCP (transfer berkas biner). */
+    public DataTransferService getDataTransfer() {
+        return dataTransfer;
+    }
+
+    /** Port kanal data TCP untuk transfer berkas. */
+    public int getDataPort() {
+        return dataPort;
+    }
+
+    /** Direktori penyimpanan berkas hasil unggahan. */
+    public String getUploadsDir() {
+        return uploadsDir;
     }
 
     public ConcurrentHashMap<String, ClientHandler> getSessions() {
@@ -104,6 +128,7 @@ public class NetMonitorServer {
                 + HB_INTERVAL_S + " dtk, batas diam " + HB_TIMEOUT_S + " dtk)");
         heartbeat.scheduleWithFixedDelay(this::checkSessions, HB_INTERVAL_S, HB_INTERVAL_S, TimeUnit.SECONDS);
         telemetry.start();
+        dataTransfer.start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(this::stop, "ShutdownHook"));
 
@@ -183,6 +208,7 @@ public class NetMonitorServer {
         }
         heartbeat.shutdownNow();
         telemetry.stop();
+        dataTransfer.stop();
         // beri tahu klien alasan koneksi ditutup, bukan sekadar memutusnya
         for (ClientHandler h : handlers) {
             h.notifyAndClose(Protocol.err(503, "Server Dimatikan"));

@@ -2,6 +2,7 @@ package netmonitor;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
@@ -38,6 +39,7 @@ public class ClientHandler implements Runnable {
     private static final int DNS_TIMEOUT_MS = 4_000;
     private static final int MAX_BROADCAST_TEXT_LENGTH = 500;   // panjang maksimal teks BROADCAST
     private static final int MAX_MSG_TEXT_LENGTH = 500;        // panjang maksimal teks MSG
+    private static final long TRANSFER_TIMEOUT_MS = Long.getLong("netmonitor.transfer.timeout", 300_000L);
 
     private final Socket socket;
     private final NetMonitorServer server;
@@ -54,6 +56,7 @@ public class ClientHandler implements Runnable {
     private volatile boolean closing;
     private volatile long lastReceived = System.currentTimeMillis();   // data apa pun dari klien (termasuk HBACK)
     private volatile long lastActivity = System.currentTimeMillis();   // perintah nyata dari klien
+    private volatile boolean transferring;   // menunggu transfer berkas di kanal data
     private int failedLogins;
     private volatile GeoIpService.Result geo;   // lokasi node (Pilar 4: pemetaan node), tampil pada LIST
 
@@ -181,6 +184,16 @@ public class ClientHandler implements Runnable {
         if (username == null || closing) {
             return;
         }
+        if (transferring) {
+            // Selama transfer berkas berlangsung, klien tidak mengirim baris perintah;
+            // tetap kirim sinyal hidup tetapi jangan dianggap putus hanya karena diam.
+            try {
+                send(Protocol.HEARTBEAT);
+            } catch (IOException e) {
+                dropDeadPeer("gagal mengirim sinyal: " + describeIo(e));
+            }
+            return;
+        }
         long now = System.currentTimeMillis();
         long silent = now - lastReceived;
         if (silent > timeoutMs) {
@@ -295,6 +308,10 @@ public class ClientHandler implements Runnable {
             case "WATCH":
                 doWatch();
                 return true;
+            case "UPLOAD":
+                return doUpload(p);
+            case "PUSH":
+                return doPush(p);
             default:
                 send(Protocol.err(400, "Perintah Tidak Dikenal"));
                 return true;
@@ -662,6 +679,142 @@ public class ClientHandler implements Runnable {
     private static boolean isAllowedExecCommand(String command) {
         return "hostname".equals(command) || "whoami".equals(command) || "ipconfig".equals(command)
                 || "ifconfig".equals(command) || "tasklist".equals(command) || "ps".equals(command);
+    }
+
+    /**
+     * Menangani perintah UPLOAD dari Inspector.
+     * Server membuat token transfer, menginformasikan kanal data kepada klien,
+     * lalu menunggu penerimaan berkas melalui {@link DataTransferService}.
+     *
+     * @param p token perintah, p[1] adalah nama berkas
+     * @throws IOException jika gagal menulis respons
+     */
+    private boolean doUpload(String[] p) throws IOException {
+        if (!requireInspector()) {
+            return true;
+        }
+        if (p.length != 2) {
+            send(Protocol.err(400, "Format: UPLOAD <namaBerkas>"));
+            return true;
+        }
+        String filename = p[1];
+        if (!Protocol.isSafeFilename(filename)) {
+            send(Protocol.err(400, "Nama Berkas Tidak Valid"));
+            return true;
+        }
+        String token = server.getDataTransfer().createUploadToken(filename);
+        transferring = true;
+        try {
+            send("200 UPLOAD READY token=" + token + " dataPort=" + server.getDataPort()
+                    + " filename=" + filename);
+            CompletableFuture<String> f = server.getDataTransfer().getResult(token);
+            String result = f.get(TRANSFER_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            if ("OK".equals(result)) {
+                send(Protocol.ok("UPLOAD Selesai " + filename));
+            } else {
+                send(Protocol.err(400, "Upload Gagal (" + result + ")"));
+            }
+        } catch (TimeoutException e) {
+            send(Protocol.err(408, "Transfer Timeout: berkas gagal diterima dalam waktu yang ditentukan"));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            send(Protocol.err(500, "Transfer Dibatalkan"));
+        } catch (ExecutionException e) {
+            send(Protocol.err(500, "Kesalahan Internal Transfer: " + e.getMessage()));
+        } finally {
+            transferring = false;
+            server.getDataTransfer().removeToken(token);
+        }
+        return true;
+    }
+
+    /**
+     * Menangani perintah PUSH dari Inspector: meminta Agent mengunduh berkas patch
+     * dari kanal data server. Menggunakan pola {@link CompletableFuture} seperti
+     * SYSINFO dan EXEC.
+     *
+     * @param p token perintah, p[1] agentId, p[2] nama berkas
+     * @throws IOException jika gagal menulis respons
+     */
+    private boolean doPush(String[] p) throws IOException {
+        if (!requireInspector()) {
+            return true;
+        }
+        if (p.length != 3) {
+            send(Protocol.err(400, "Format: PUSH <agentId> <namaBerkas>"));
+            return true;
+        }
+        String agentId = p[1];
+        String filename = p[2];
+        if (!Protocol.isSafeFilename(filename)) {
+            send(Protocol.err(400, "Nama Berkas Tidak Valid"));
+            return true;
+        }
+        File uploaded = new File(server.getUploadsDir(), filename);
+        if (!uploaded.isFile()) {
+            send(Protocol.err(404, "Berkas Patch Tidak Ada di Server"));
+            return true;
+        }
+        ClientHandler agent = server.getSessions().get(agentId);
+        if (agent == null || !agent.isAgent()) {
+            send(Protocol.err(404, "Agent Tidak Ditemukan (tidak terhubung; periksa daftar dengan LIST)"));
+            return true;
+        }
+        String token = server.getDataTransfer().createPushToken(filename, uploaded.length());
+        transferring = true;
+        try {
+            String result = agent.requestPush(token, server.getDataPort(), TRANSFER_TIMEOUT_MS);
+            if ("OK".equals(result) || "PUSH OK".equals(result)) {
+                send(Protocol.ok("PUSH Selesai " + agentId + " " + filename));
+            } else {
+                send(Protocol.err(500, "Push Gagal (" + Protocol.clean(result, 60) + ")"));
+            }
+        } catch (AgentException e) {
+            send(Protocol.err(e.code, e.getMessage()));
+        } finally {
+            transferring = false;
+            server.getDataTransfer().removeToken(token);
+        }
+        return true;
+    }
+
+    /**
+     * Meminta Agent mengunduh berkas patch melalui kanal data.
+     * Server mengirim {@code REQ <id> PUSH <token> <dataPort>} ke Agent,
+     * lalu menunggu balasan {@code RES <id> PUSH OK} atau error.
+     *
+     * @param token     token transfer yang dibuat oleh server
+     * @param dataPort  port kanal data TCP
+     * @param timeoutMs batas waktu tunggu balasan Agent
+     * @return "OK" jika Agent berhasil mengunduh berkas
+     * @throws AgentException jika Agent gagal, timeout, atau terputus
+     */
+    private String requestPush(String token, int dataPort, long timeoutMs) throws AgentException {
+        String id = Long.toString(requestSeq.incrementAndGet());
+        CompletableFuture<String> future = new CompletableFuture<>();
+        pending.put(id, future);
+        try {
+            send("REQ " + id + " PUSH " + token + " " + dataPort);
+            String reply = future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            if (reply.startsWith("ERR")) {
+                throw new AgentException(500, "Agent Gagal Menerima Berkas (" + Protocol.clean(reply, 60) + ")");
+            }
+            return reply;
+        } catch (TimeoutException e) {
+            throw new AgentException(408, "Agent Tidak Merespons (waktu habis " + (timeoutMs / 1000)
+                    + " detik; jaringan Agent mungkin putus)");
+        } catch (CancellationException e) {
+            throw new AgentException(502, "Agent Terputus Saat Menunggu Respons");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AgentException(500, "Permintaan Dibatalkan");
+        } catch (ExecutionException e) {
+            throw new AgentException(500, "Kesalahan Saat Menunggu Agent");
+        } catch (IOException e) {
+            throw new AgentException(502, "Agent Terputus (gagal mengirim permintaan: " + describeIo(e) + ")");
+        } finally {
+            pending.remove(id);
+        }
     }
 
     /**

@@ -1,7 +1,14 @@
 package netmonitor;
 
 import java.io.BufferedReader;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.BufferedWriter;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
@@ -43,6 +50,8 @@ public final class ClientEngine {
     private static final int LOGIN_TIMEOUT_MS = 15_000;      // batas menunggu jawaban LOGIN (server mungkin mencari GeoIP)
     private static final int RESPONSE_TIMEOUT_MS = 25_000;   // batas menunggu jawaban sebuah perintah (read timeout)
     private static final int POLL_MS = 1_000;                // setSoTimeout pendek agar pemantau koneksi bisa berjalan
+    private static final int DATA_CONNECT_TIMEOUT_MS = 10_000; // batas menyambung ke kanal data
+    private static final int DATA_TRANSFER_TIMEOUT_MS = 300_000; // batas transfer berkas di kanal data
     private static final int DNS_TIMEOUT_MS = 5_000;
     // Tidak ada sinyal (heartbeat) dari server selama ini -> koneksi dianggap putus.
     private static final long WATCHDOG_MS = Long.getLong("netmonitor.heartbeat.timeout", 30L) * 1000L;
@@ -196,6 +205,137 @@ public final class ClientEngine {
             return new Result(Result.Status.LOST, null, quitting);
         }
         return new Result(Result.Status.OK, resp, quitting);
+    }
+
+    /**
+     * Mengunggah berkas lokal ke direktori unggahan server (khusus Inspector).
+     * Memeriksa keberadaan berkas lokal (kecuali path mengandung ".." yang diteruskan
+     * ke server untuk diuji penolakannya), mengirim perintah UPLOAD dengan nama berkas
+     * dasar, lalu mengirim konten berkas melalui kanal data TCP.
+     *
+     * @param command perintah penuh dari pengguna, mis. "UPLOAD /path/ke/file.jar"
+     * @return hasil perintah (status, baris respons, quitting)
+     */
+    public Result requestUpload(String command) {
+        Connection c = current;
+        if (c == null || c.lost) {
+            return new Result(Result.Status.LOST, null, false);
+        }
+        String arg = command.trim().substring("UPLOAD".length()).trim();
+        if (arg.isEmpty()) {
+            return new Result(Result.Status.OK, "400 ERR Format: UPLOAD <pathLokal>", false);
+        }
+        boolean suspicious = arg.contains("..");
+        File localFile = new File(arg);
+        if (!suspicious && (!localFile.exists() || !localFile.isFile())) {
+            return new Result(Result.Status.OK, "400 ERR Berkas Lokal Tidak Ditemukan: " + arg, false);
+        }
+        String sendName = suspicious ? arg : localFile.getName();
+        c.awaiting = true;
+        try {
+            c.send("UPLOAD " + sendName);
+        } catch (IOException e) {
+            c.awaiting = false;
+            c.markLost(describeIo(e));
+            return new Result(Result.Status.LOST, null, false);
+        }
+        String tokenLine;
+        try {
+            tokenLine = c.responses.poll(RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            c.awaiting = false;
+            return new Result(Result.Status.LOST, null, false);
+        }
+        if (tokenLine == null || !tokenLine.startsWith("200")) {
+            c.awaiting = false;
+            return new Result(Result.Status.OK, tokenLine == null ? "408 ERR Tidak Ada Respons" : tokenLine, false);
+        }
+        // parse token dan dataPort dari respons, mis. "200 UPLOAD READY token=abc dataPort=9092 filename=x"
+        String token = null;
+        int dataPort = Integer.getInteger("netmonitor.data.port", 9092);
+        for (String tok : tokenLine.split("\\s+")) {
+            if (tok.startsWith("token=")) {
+                token = tok.substring("token=".length());
+            } else if (tok.startsWith("dataPort=")) {
+                try {
+                    dataPort = Integer.parseInt(tok.substring("dataPort=".length()));
+                } catch (NumberFormatException ignored) {
+                    // pakai default
+                }
+            }
+        }
+        if (token == null) {
+            c.awaiting = false;
+            return new Result(Result.Status.OK, "500 ERR Respons Server Tidak Valid", false);
+        }
+        // suspicious path: server menolak di level perintah, tidak ada transfer
+        if (suspicious) {
+            c.awaiting = false;
+            return new Result(Result.Status.OK, tokenLine, false);
+        }
+        // transfer data melalui kanal data
+        try {
+            uploadData(cfg.getHost(), dataPort, token, localFile);
+        } catch (IOException e) {
+            // abaikan; hasil final akan ditentukan oleh respons server
+        }
+        // tunggu baris final dari server
+        String finalLine;
+        try {
+            finalLine = c.responses.poll(RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            c.awaiting = false;
+            return new Result(Result.Status.LOST, null, false);
+        }
+        c.awaiting = false;
+        return new Result(Result.Status.OK, finalLine == null ? tokenLine : finalLine, false);
+    }
+
+    /**
+     * Mengirim berkas lokal ke kanal data server melalui soket TCP terpisah.
+     *
+     * @param host     host server
+     * @param port     port kanal data
+     * @param token    token transfer yang diterima dari server
+     * @param file     berkas yang akan dikirim
+     * @throws IOException jika transfer gagal
+     */
+    private void uploadData(String host, int port, String token, File file) throws IOException {
+        Socket socket = new Socket();
+        socket.connect(new InetSocketAddress(InetAddress.getByName(host), port), DATA_CONNECT_TIMEOUT_MS);
+        socket.setSoTimeout(DATA_TRANSFER_TIMEOUT_MS);
+        DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
+        try {
+            dos.writeUTF(token);
+            dos.writeUTF(file.getName());
+            dos.writeLong(file.length());
+            long sent = 0L;
+            try (FileInputStream fis = new FileInputStream(file)) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = fis.read(buffer)) != -1) {
+                    dos.write(buffer, 0, read);
+                    sent += read;
+                    ui.onTransferProgress("UPLOAD", sent, file.length());
+                }
+            }
+            dos.flush();
+            socket.shutdownOutput();
+            // tunggu sedikit agar server memproses sisa data
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        } finally {
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+                // abaikan
+            }
+        }
     }
 
     /**
@@ -731,6 +871,67 @@ public final class ClientEngine {
         }
     }
 
+    /**
+     * Mengunduh berkas patch dari kanal data server (khusus Agent).
+     * Berkas disimpan di subfolder {@code downloads/<agentId>/<namaBerkas>}
+     * agar beberapa Agent pada mesin yang sama tidak saling menimpa.
+     *
+     * @param token    token transfer yang dikirim server pada pesan REQ PUSH
+     * @param dataPort port kanal data TCP server
+     * @return "OK" bila berhasil, atau "ERR <penyebab>" bila gagal
+     */
+    private String downloadPush(String token, int dataPort) {
+        Socket socket = new Socket();
+        try {
+            socket.connect(new InetSocketAddress(InetAddress.getByName(cfg.getHost()), dataPort),
+                    DATA_CONNECT_TIMEOUT_MS);
+            socket.setSoTimeout(DATA_TRANSFER_TIMEOUT_MS);
+            DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
+            dos.writeUTF(token);
+            dos.flush();
+            socket.shutdownOutput();
+
+            DataInputStream dis = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
+            String filename = dis.readUTF();
+            long expected = dis.readLong();
+            if (!Protocol.isSafeFilename(filename)) {
+                return "ERR nama_berkas_tidak_valid";
+            }
+
+            File dir = new File("downloads", cfg.getUsername());
+            if (!dir.exists() && !dir.mkdirs()) {
+                return "ERR gagal_membuat_direktori";
+            }
+            File target = new File(dir, filename);
+            long received = 0L;
+            try (FileOutputStream fos = new FileOutputStream(target)) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = dis.read(buffer)) != -1) {
+                    fos.write(buffer, 0, read);
+                    received += read;
+                    ui.onTransferProgress("PUSH", received, expected);
+                }
+            } catch (IOException e) {
+                target.delete();
+                return "ERR disk_penuh: " + e.getMessage();
+            }
+            if (received != expected) {
+                target.delete();
+                return "ERR ukuran_tidak_sesuai: expected=" + expected + " received=" + received;
+            }
+            return "OK";
+        } catch (IOException e) {
+            return "ERR " + describeIo(e);
+        } finally {
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+                // abaikan
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ mode AGENT
 
     /** Menjawab permintaan server: "REQ <id> SYSINFO" dibalas "RES <id> <data>",
@@ -743,6 +944,26 @@ public final class ClientEngine {
                 c.send("RES " + id + " " + collectSysinfo());
             } else if (p.length >= 4 && p[2].equals("EXEC")) {
                 c.send("RES " + id + " " + collectExecOutput(p[3]));
+            } else if (p.length >= 5 && p[2].equals("PUSH")) {
+                final String pushToken = p[3];
+                final int pushPort;
+                try {
+                    pushPort = Integer.parseInt(p[4]);
+                } catch (NumberFormatException e) {
+                    c.send("RES " + id + " ERR port_tidak_valid");
+                    return;
+                }
+                final String reqId = id;
+                Thread t = new Thread(() -> {
+                    String result = downloadPush(pushToken, pushPort);
+                    try {
+                        c.send("RES " + reqId + " PUSH " + result);
+                    } catch (IOException e) {
+                        c.markLost(describeIo(e));
+                    }
+                }, "push-download");
+                t.setDaemon(true);
+                t.start();
             } else {
                 c.send("RES " + id + " ERR perintah_tidak_dikenal");
             }
