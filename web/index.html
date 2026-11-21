@@ -109,6 +109,91 @@
           </div>
         </section>
 
+        <section class="panel workspace">
+          <div class="workspace-tabs">
+            <button class="ws-tab active" data-tab="diag" id="tab-diag">Diagnostics &amp; Remote Exec</button>
+            <button class="ws-tab" data-tab="files" id="tab-files">Patch &amp; File Transfer</button>
+          </div>
+
+          <div class="ws-content" id="ws-diag">
+            <div class="diag-toolbar">
+              <label class="field diag-field">
+                <span>Target Agent</span>
+                <select id="diag-agent"></select>
+              </label>
+              <label class="field diag-field">
+                <span>PING Host</span>
+                <input id="diag-ping-host" type="text" placeholder="8.8.8.8">
+              </label>
+              <button id="diag-ping-btn" class="btn bordered">PING</button>
+              <label class="field diag-field">
+                <span>RESOLVE Domain</span>
+                <input id="diag-resolve-domain" type="text" placeholder="example.com">
+              </label>
+              <button id="diag-resolve-btn" class="btn bordered">RESOLVE</button>
+            </div>
+            <div class="diag-grid">
+              <section class="diag-panel">
+                <div class="diag-head">
+                  <span>System Information</span>
+                  <span class="diag-cmd">(SYSINFO)</span>
+                </div>
+                <button id="diag-sysinfo-btn" class="btn primary full">Fetch SysInfo</button>
+                <div id="diag-sysinfo-output" class="diag-output mono"></div>
+              </section>
+              <section class="diag-panel">
+                <div class="diag-head">
+                  <span>Remote Command</span>
+                  <span class="diag-cmd">(EXEC)</span>
+                </div>
+                <div class="diag-exec-input">
+                  <input id="diag-exec-command" type="text" placeholder="hostname">
+                  <button id="diag-exec-btn" class="btn primary full">Run</button>
+                </div>
+                <div id="diag-exec-output" class="diag-output mono"></div>
+              </section>
+            </div>
+          </div>
+
+          <div class="ws-content hidden" id="ws-files">
+            <div class="file-grid">
+              <section class="diag-panel">
+                <div class="diag-head">
+                  <span>Stage File to Server</span>
+                  <span class="diag-cmd">(UPLOAD)</span>
+                </div>
+                <div class="file-upload-row">
+                  <input id="file-input" type="file" class="file-input">
+                  <button id="file-upload-btn" class="btn primary full">Upload</button>
+                </div>
+                <div class="progress-track">
+                  <div id="upload-progress" class="progress-fill"></div>
+                </div>
+                <div class="file-list-head">Staged Files</div>
+                <div id="staged-files" class="file-list"></div>
+              </section>
+              <section class="diag-panel">
+                <div class="diag-head">
+                  <span>Push Patch to Agent</span>
+                  <span class="diag-cmd">(PUSH)</span>
+                </div>
+                <div class="file-push-row">
+                  <label class="field diag-field">
+                    <span>Staged File</span>
+                    <select id="push-file-select"></select>
+                  </label>
+                  <label class="field diag-field">
+                    <span>Target Agent</span>
+                    <select id="push-agent-select"></select>
+                  </label>
+                  <button id="push-btn" class="btn primary full">Push to Agent</button>
+                </div>
+                <div id="push-status" class="diag-output mono"></div>
+              </section>
+            </div>
+          </div>
+        </section>
+
         <section class="panel log-panel">
           <div class="panel-header">
             <h2>Protocol Activity</h2>

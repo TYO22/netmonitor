@@ -447,6 +447,232 @@ tbody tr.selected {
   font-family: var(--font-mono);
 }
 
+/* ---------- Diagnostics ---------- */
+.diag-toolbar {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.diag-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.diag-field input {
+  width: 180px;
+  height: 28px;
+}
+
+.diag-field select {
+  height: 28px;
+}
+
+.diag-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 16px;
+}
+
+.diag-panel {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+}
+
+.diag-head {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.diag-cmd {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 11px;
+}
+
+.diag-exec-input {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.diag-exec-input input {
+  flex: 1;
+}
+
+.diag-output {
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-y: auto;
+  min-height: 200px;
+  background: var(--bg-canvas);
+  flex: 1;
+}
+
+.workspace {
+  overflow: hidden;
+}
+
+.workspace-tabs {
+  display: flex;
+  gap: 0;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ws-tab {
+  height: 32px;
+  padding: 0 16px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.ws-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.ws-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--telemetry-green);
+}
+
+.ws-content {
+  padding: 0;
+}
+
+.file-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 16px;
+}
+
+.file-upload-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+
+.file-input {
+  flex: 1;
+  height: 28px;
+  padding: 2px 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+
+.progress-track {
+  height: 4px;
+  background: var(--border-subtle);
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 8px 12px;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--telemetry-green);
+  border-radius: 4px;
+  transition: width 120ms ease;
+}
+
+.file-list-head {
+  padding: 8px 12px 4px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.file-list {
+  padding: 4px 12px 12px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  min-height: 60px;
+  overflow-y: auto;
+  max-height: 180px;
+}
+
+.file-list .file-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.file-list .file-row:last-child {
+  border-bottom: none;
+}
+
+.file-push-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+
+.file-push-row .field {
+  flex: 1;
+  min-width: 120px;
+}
+
+@media (max-width: 720px) {
+  .diag-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .file-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 720px) {
   .topbar {
     height: auto;

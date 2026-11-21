@@ -96,6 +96,12 @@ public class WebBridgeServer {
         server.createContext("/api/telemetry/subscribe", this::handleTelemetrySubscribe);
         server.createContext("/api/telemetry/unsubscribe", this::handleTelemetryUnsubscribe);
         server.createContext("/api/stream", this::handleStream);
+        server.createContext("/api/diagnostics/sysinfo", this::handleDiagnosticsSysinfo);
+        server.createContext("/api/diagnostics/exec", this::handleDiagnosticsExec);
+        server.createContext("/api/diagnostics/ping", this::handleDiagnosticsPing);
+        server.createContext("/api/diagnostics/resolve", this::handleDiagnosticsResolve);
+        server.createContext("/api/files/upload", this::handleFilesUpload);
+        server.createContext("/api/files/push", this::handleFilesPush);
     }
 
     // ------------------------------------------------------------------ static files
@@ -567,6 +573,356 @@ public class WebBridgeServer {
         sendJson(ex, 200, mapOf("ok", r.line != null && r.line.startsWith("200"), "line", r.line));
     }
 
+    /**
+     * Endpoint diagnostik: SYSINFO pada Agent target.
+     * Body JSON: { agentId }.
+     *
+     * @param ex pertukaran HTTP
+     * @throws IOException bila terjadi kesalahan I/O
+     */
+    private void handleDiagnosticsSysinfo(HttpExchange ex) throws IOException {
+        WebSession s = inspectorSession(ex);
+        if (s == null) return;
+        JsonObject body = readJsonObject(ex);
+        if (body == null) return;
+        String agentId = str(body, "agentId", "").trim();
+        if (agentId.isEmpty()) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "agentId tidak boleh kosong"));
+            return;
+        }
+        String command = "SYSINFO " + agentId;
+        ClientEngine.Result r;
+        synchronized (s) {
+            r = s.engine.request(command);
+        }
+        sendJson(ex, 200, diagnosticsSysinfo(s, command, r));
+    }
+
+    /**
+     * Endpoint diagnostik: eksekusi perintah whitelist di Agent target.
+     * Body JSON: { agentId, command }.
+     *
+     * @param ex pertukaran HTTP
+     * @throws IOException bila terjadi kesalahan I/O
+     */
+    private void handleDiagnosticsExec(HttpExchange ex) throws IOException {
+        WebSession s = inspectorSession(ex);
+        if (s == null) return;
+        JsonObject body = readJsonObject(ex);
+        if (body == null) return;
+        String agentId = str(body, "agentId", "").trim();
+        String command = str(body, "command", "").trim();
+        if (agentId.isEmpty()) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "agentId tidak boleh kosong"));
+            return;
+        }
+        if (command.isEmpty()) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "command tidak boleh kosong"));
+            return;
+        }
+        String cleanCommand = command.split("\\s+")[0];
+        String fullCommand = "EXEC " + agentId + " " + cleanCommand;
+        ClientEngine.Result r;
+        synchronized (s) {
+            r = s.engine.request(fullCommand);
+        }
+        sendJson(ex, 200, diagnosticsResult(s, fullCommand, r));
+    }
+
+    /**
+     * Endpoint diagnostik: PING host dari sisi server.
+     * Body JSON: { host }.
+     *
+     * @param ex pertukaran HTTP
+     * @throws IOException bila terjadi kesalahan I/O
+     */
+    private void handleDiagnosticsPing(HttpExchange ex) throws IOException {
+        WebSession s = inspectorSession(ex);
+        if (s == null) return;
+        JsonObject body = readJsonObject(ex);
+        if (body == null) return;
+        String host = str(body, "host", "").trim();
+        if (host.isEmpty()) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "host tidak boleh kosong"));
+            return;
+        }
+        String fullCommand = "PING " + host;
+        ClientEngine.Result r;
+        synchronized (s) {
+            r = s.engine.request(fullCommand);
+        }
+        sendJson(ex, 200, diagnosticsResult(s, fullCommand, r));
+    }
+
+    /**
+     * Endpoint diagnostik: resolusi DNS domain dari sisi server.
+     * Body JSON: { domain }.
+     *
+     * @param ex pertukaran HTTP
+     * @throws IOException bila terjadi kesalahan I/O
+     */
+    private void handleDiagnosticsResolve(HttpExchange ex) throws IOException {
+        WebSession s = inspectorSession(ex);
+        if (s == null) return;
+        JsonObject body = readJsonObject(ex);
+        if (body == null) return;
+        String domain = str(body, "domain", "").trim();
+        if (domain.isEmpty()) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "domain tidak boleh kosong"));
+            return;
+        }
+        String fullCommand = "RESOLVE " + domain;
+        ClientEngine.Result r;
+        synchronized (s) {
+            r = s.engine.request(fullCommand);
+        }
+        sendJson(ex, 200, diagnosticsResult(s, fullCommand, r));
+    }
+
+    /**
+     * Validasi sesi INSPECTOR yang sudah terhubung untuk endpoint diagnostik.
+     *
+     * @param ex pertukaran HTTP
+     * @return sesi web bila valid, atau null bila permintaan ditolak (respons sudah dikirim)
+     * @throws IOException bila terjadi kesalahan I/O
+     */
+    private WebSession inspectorSession(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            sendJson(ex, 405, mapOf("ok", false, "message", "Method not allowed"));
+            return null;
+        }
+        WebSession s = sessionFromRequest(ex);
+        if (s == null) {
+            sendJson(ex, 401, mapOf("ok", false, "message", "Sesi tidak ditemukan"));
+            return null;
+        }
+        if (!"INSPECTOR".equals(s.cfg.getRole())) {
+            sendJson(ex, 403, mapOf("ok", false, "message", "Hanya INSPECTOR"));
+            return null;
+        }
+        if (!s.connected) {
+            sendJson(ex, 409, mapOf("ok", false, "message", "Sesi tidak terhubung"));
+            return null;
+        }
+        return s;
+    }
+
+    /**
+     * Menyusun respons JSON untuk SYSINFO dan menyiarkan log SSE.
+     *
+     * @param s       sesi browser
+     * @param command perintah yang dijalankan
+     * @param r       hasil perintah dari ClientEngine
+     * @return peta respons
+     */
+    private Map<String, Object> diagnosticsSysinfo(WebSession s, String command, ClientEngine.Result r) {
+        boolean ok = r.status == ClientEngine.Result.Status.OK && r.line != null && r.line.startsWith("200");
+        String level = ok ? "INFO" : "ERROR";
+        broadcastSse(s, "log", mapOf("level", level, "line", command + " -> " + (r.line == null ? String.valueOf(r.status) : r.line), "timestamp", now()));
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("ok", ok);
+        out.put("line", r.line == null ? "" : r.line);
+        out.put("message", ok ? "SYSINFO diterima" : r.line == null ? String.valueOf(r.status) : r.line);
+        out.put("sysinfo", ok ? parseSysinfo(r.line) : new java.util.LinkedHashMap<>());
+        return out;
+    }
+
+    /**
+     * Menyusun respons JSON untuk perintah diagnostik umum (EXEC/PING/RESOLVE) dan menyiarkan log SSE.
+     *
+     * @param s       sesi browser
+     * @param command perintah yang dijalankan
+     * @param r       hasil perintah dari ClientEngine
+     * @return peta respons
+     */
+    private Map<String, Object> diagnosticsResult(WebSession s, String command, ClientEngine.Result r) {
+        boolean ok = r.status == ClientEngine.Result.Status.OK && r.line != null && r.line.startsWith("200");
+        String level = ok ? "INFO" : "ERROR";
+        broadcastSse(s, "log", mapOf("level", level, "line", command + " -> " + (r.line == null ? String.valueOf(r.status) : r.line), "timestamp", now()));
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("ok", ok);
+        out.put("line", r.line == null ? "" : r.line);
+        out.put("message", ok ? "Perintah berhasil" : r.line == null ? String.valueOf(r.status) : r.line);
+        return out;
+    }
+
+    /**
+     * Mengurai baris respons SYSINFO ke dalam pasangan kunci-nilai:
+     * {@code 200 SYSINFO agentId os=... cores=... ram=...GB agentUptime=...s}.
+     *
+     * @param line baris respons server
+     * @return peta field sistem (kosong bila baris tidak valid)
+     */
+    private static Map<String, Object> parseSysinfo(String line) {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        if (line == null) {
+            return out;
+        }
+        String[] parts = line.split("\\s+");
+        for (int i = 2; i < parts.length; i++) {
+            String token = parts[i];
+            int eq = token.indexOf('=');
+            if (eq > 0) {
+                out.put(token.substring(0, eq), token.substring(eq + 1));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Endpoint transfer: unggah berkas patch ke server (Inspector).
+     * Body berisi byte mentah berkas; nama flat diperoleh dari header {@code X-Filename}.
+     *
+     * @param ex pertukaran HTTP
+     * @throws IOException bila terjadi kesalahan I/O
+     */
+    private void handleFilesUpload(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            sendJson(ex, 405, mapOf("ok", false, "message", "Method not allowed"));
+            return;
+        }
+        WebSession s = sessionFromRequest(ex);
+        if (s == null) {
+            sendJson(ex, 401, mapOf("ok", false, "message", "Sesi tidak ditemukan"));
+            return;
+        }
+        if (!"INSPECTOR".equals(s.cfg.getRole())) {
+            sendJson(ex, 403, mapOf("ok", false, "message", "Hanya INSPECTOR"));
+            return;
+        }
+        if (!s.connected) {
+            sendJson(ex, 409, mapOf("ok", false, "message", "Sesi tidak terhubung"));
+            return;
+        }
+        String rawName = ex.getRequestHeaders().getFirst("X-Filename");
+        if (rawName == null || rawName.trim().isEmpty()) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "Header X-Filename wajib diisi"));
+            return;
+        }
+        String filename;
+        try {
+            filename = Paths.get(rawName).getFileName().toString();
+        } catch (Exception e) {
+            filename = rawName.trim();
+        }
+        if (filename.isEmpty() || !Protocol.isSafeFilename(filename)) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "Nama berkas tidak valid"));
+            return;
+        }
+        byte[] data;
+        try {
+            data = readBodyBytes(ex);
+        } catch (IOException e) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "Gagal membaca isi berkas"));
+            return;
+        }
+        int maxSize = Integer.getInteger("netmonitor.max.file.size", 10 * 1024 * 1024);
+        if (data.length > maxSize) {
+            sendJson(ex, 413, mapOf("ok", false, "message", "Ukuran berkas melebihi batas"));
+            return;
+        }
+        Path tempDir = null;
+        Path tempFile = null;
+        try {
+            tempDir = Files.createTempDirectory("netmonitor-web");
+            tempFile = tempDir.resolve(filename);
+            Files.write(tempFile, data);
+            s.currentUploadFilename = filename;
+            ClientEngine.Result r;
+            synchronized (s) {
+                r = s.engine.requestUpload("UPLOAD " + tempFile.toAbsolutePath().toString());
+            }
+            s.currentUploadFilename = null;
+            boolean ok = r.status == ClientEngine.Result.Status.OK && r.line != null && r.line.startsWith("200");
+            if (ok && !s.stagedFiles.contains(filename)) {
+                s.stagedFiles.add(filename);
+            }
+            broadcastSse(s, "log", mapOf("level", ok ? "INFO" : "ERROR",
+                    "line", "UPLOAD " + filename + " -> " + (r.line == null ? String.valueOf(r.status) : r.line),
+                    "timestamp", now()));
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("ok", ok);
+            out.put("line", r.line == null ? "" : r.line);
+            out.put("message", ok ? "Upload selesai" : (r.line == null ? String.valueOf(r.status) : r.line));
+            out.put("filename", filename);
+            out.put("bytesTransferred", data.length);
+            sendJson(ex, 200, out);
+        } catch (IOException e) {
+            s.currentUploadFilename = null;
+            sendJson(ex, 500, mapOf("ok", false, "message", "Gagal menulis berkas sementara: " + e.getMessage()));
+        } finally {
+            if (tempFile != null) {
+                try {
+                    Files.deleteIfExists(tempFile);
+                } catch (IOException ignored) {
+                    // abaikan
+                }
+            }
+            if (tempDir != null) {
+                try {
+                    Files.deleteIfExists(tempDir);
+                } catch (IOException ignored) {
+                    // abaikan
+                }
+            }
+        }
+    }
+
+    /**
+     * Endpoint transfer: PUSH berkas patch dari server ke Agent (Inspector).
+     * Body JSON: { agentId, filename }.
+     *
+     * @param ex pertukaran HTTP
+     * @throws IOException bila terjadi kesalahan I/O
+     */
+    private void handleFilesPush(HttpExchange ex) throws IOException {
+        WebSession s = inspectorSession(ex);
+        if (s == null) return;
+        JsonObject body = readJsonObject(ex);
+        if (body == null) return;
+        String agentId = str(body, "agentId", "").trim();
+        String filename = str(body, "filename", "").trim();
+        if (agentId.isEmpty()) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "agentId tidak boleh kosong"));
+            return;
+        }
+        if (filename.isEmpty()) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "filename tidak boleh kosong"));
+            return;
+        }
+        if (!Protocol.isSafeFilename(filename)) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "Nama berkas tidak valid"));
+            return;
+        }
+        String fullCommand = "PUSH " + agentId + " " + filename;
+        ClientEngine.Result r;
+        synchronized (s) {
+            r = s.engine.request(fullCommand);
+        }
+        boolean ok = r.status == ClientEngine.Result.Status.OK && r.line != null && r.line.startsWith("200");
+        broadcastSse(s, "log", mapOf("level", ok ? "INFO" : "ERROR",
+                "line", fullCommand + " -> " + (r.line == null ? String.valueOf(r.status) : r.line),
+                "timestamp", now()));
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("ok", ok);
+        out.put("line", r.line == null ? "" : r.line);
+        out.put("message", ok ? "Push selesai" : (r.line == null ? String.valueOf(r.status) : r.line));
+        sendJson(ex, 200, out);
+    }
+
+    /**
+     * Membaca seluruh isi body permintaan HTTP sebagai byte mentah (untuk unggah berkas).
+     *
+     * @param ex pertukaran HTTP
+     * @return byte body
+     * @throws IOException bila terjadi kesalahan I/O
+     */
+    private static byte[] readBodyBytes(HttpExchange ex) throws IOException {
+        try (InputStream is = ex.getRequestBody()) {
+            return is.readAllBytes();
+        }
+    }
+
     private JsonObject readJsonObject(HttpExchange ex) {
         try {
             return gson.fromJson(readBody(ex), JsonObject.class);
@@ -754,7 +1110,8 @@ public class WebBridgeServer {
 
         @Override
         public void onTransferProgress(String direction, long bytesTransferred, long totalExpected) {
-            broadcast("transfer", mapStatic("direction", direction, "filename", null, "bytesTransferred", bytesTransferred, "totalBytes", totalExpected, "status", "progress", "timestamp", now()));
+            String filename = (session != null) ? session.currentUploadFilename : null;
+            broadcast("transfer", mapStatic("direction", direction, "filename", filename, "bytesTransferred", bytesTransferred, "totalBytes", totalExpected, "status", "progress", "timestamp", now()));
         }
 
         @Override
@@ -810,6 +1167,10 @@ public class WebBridgeServer {
          * Urutan nama agent dari LIST terakhir, untuk menjaga urutan tampilan tabel.
          */
         public volatile List<String> nodeOrder = new ArrayList<>();
+        /**
+         * Nama berkas yang sedang diunggah pada sesi ini (untuk progress SSE).
+         */
+        public volatile String currentUploadFilename;
 
         WebSession(String id, ClientConfig cfg, ClientEngine engine, WebListener listener) {
             this.id = id;
@@ -821,6 +1182,34 @@ public class WebBridgeServer {
     }
 
     // ------------------------------------------------------------------ static SSE writer
+
+    /**
+     * Mencari event SSE ke semua klien yang terhubung pada satu sesi browser.
+     *
+     * @param s     sesi browser
+     * @param event nama event SSE
+     * @param data  data (Map/JSON string)
+     */
+    static void broadcastSse(WebSession s, String event, Object data) {
+        String json;
+        try {
+            json = new Gson().toJson(data);
+        } catch (Exception e) {
+            json = "{\"error\":\"serialization\"}";
+        }
+        for (OutputStream os : new ArrayList<>(s.sseClients)) {
+            try {
+                writeSse(os, event, json);
+            } catch (IOException e) {
+                s.sseClients.remove(os);
+                try {
+                    os.close();
+                } catch (IOException ignored) {
+                    // abaikan
+                }
+            }
+        }
+    }
 
     static void writeSse(OutputStream os, String event, Object data) throws IOException {
         Gson g = new Gson();

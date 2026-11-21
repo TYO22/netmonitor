@@ -83,12 +83,15 @@ async function loadState() {
   state.subscribed = !!d.subscribed;
   state.udpPort = d.udpPort || state.udpPort;
   state.nodes = Array.isArray(d.nodes) ? d.nodes : [];
+  state.stagedFiles = Array.isArray(d.stagedFiles) ? d.stagedFiles : [];
   if (state.connected) {
     if (state.role === 'INSPECTOR') {
       showView('inspector');
       updateSessionTag();
       updateTelemetryButton();
       renderNodes();
+      updateStagedFilesUI();
+      updatePushFileSelect();
       if (state.nodes.length === 0) loadNodes();
     } else if (state.role === 'AGENT') {
       showView('agent');
@@ -186,6 +189,8 @@ function renderNodes() {
     updateSparkline();
   }
   updateSparkline();
+  updateDiagnosticsDropdown();
+  updatePushAgentSelect();
 }
 
 function createCell(tag, text, className) {
@@ -296,6 +301,236 @@ function updateTableTelemetry(d) {
   renderNodes();
 }
 
+function updateDiagnosticsDropdown() {
+  const sel = $('diag-agent');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '';
+  state.nodes.forEach((node) => {
+    if (String(node.role || '').toUpperCase() === 'AGENT') {
+      const o = document.createElement('option');
+      o.value = node.agentId || '';
+      o.textContent = escapeText(node.agentId);
+      sel.appendChild(o);
+    }
+  });
+  if (current && [...sel.options].some((o) => o.value === current)) {
+    sel.value = current;
+  }
+}
+
+function showWorkspaceTab(tab) {
+  document.querySelectorAll('.ws-tab').forEach((b) => {
+    b.classList.toggle('active', b.dataset.tab === tab);
+  });
+  const diag = $('ws-diag');
+  const files = $('ws-files');
+  if (diag) diag.classList.toggle('hidden', tab !== 'diag');
+  if (files) files.classList.toggle('hidden', tab !== 'files');
+  if (tab === 'files') {
+    updateStagedFilesUI();
+    updatePushAgentSelect();
+    updatePushFileSelect();
+  }
+}
+
+function updateStagedFilesUI() {
+  const list = $('staged-files');
+  if (!list) return;
+  list.innerHTML = '';
+  const files = Array.isArray(state.stagedFiles) ? state.stagedFiles : [];
+  if (files.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'file-row';
+    empty.textContent = 'No staged files';
+    list.appendChild(empty);
+    return;
+  }
+  files.forEach((name) => {
+    const row = document.createElement('div');
+    row.className = 'file-row';
+    const n = document.createElement('span');
+    n.textContent = escapeText(name);
+    row.appendChild(n);
+    list.appendChild(row);
+  });
+}
+
+function updatePushFileSelect() {
+  const sel = $('push-file-select');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '';
+  const files = Array.isArray(state.stagedFiles) ? state.stagedFiles : [];
+  files.forEach((name) => {
+    const o = document.createElement('option');
+    o.value = name;
+    o.textContent = escapeText(name);
+    sel.appendChild(o);
+  });
+  if (current && [...sel.options].some((o) => o.value === current)) {
+    sel.value = current;
+  }
+}
+
+function updatePushAgentSelect() {
+  const sel = $('push-agent-select');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '';
+  state.nodes.forEach((node) => {
+    if (String(node.role || '').toUpperCase() === 'AGENT') {
+      const o = document.createElement('option');
+      o.value = node.agentId || '';
+      o.textContent = escapeText(node.agentId);
+      sel.appendChild(o);
+    }
+  });
+  if (current && [...sel.options].some((o) => o.value === current)) {
+    sel.value = current;
+  }
+}
+
+function appendPushStatus(text) {
+  const out = $('push-status');
+  if (!out) return;
+  const ts = formatTime(new Date().toISOString());
+  const line = '[' + ts + '] ' + String(text);
+  out.textContent = out.textContent ? out.textContent + '\n' + line : line;
+  out.scrollTop = out.scrollHeight;
+}
+
+async function handleFileUpload() {
+  const input = $('file-input');
+  const file = input && input.files && input.files[0];
+  if (!file) {
+    appendPushStatus('Pilih berkas terlebih dahulu.');
+    return;
+  }
+  const progress = $('upload-progress');
+  if (progress) progress.style.width = '0%';
+  let data = null;
+  let status = 0;
+  try {
+    const body = await file.arrayBuffer();
+    const res = await fetch('/api/files/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Filename': file.name },
+      body: body,
+      credentials: 'same-origin'
+    });
+    status = res.status;
+    try { data = await res.json(); } catch (e) { data = null; }
+  } catch (e) {
+    appendPushStatus('Upload gagal: ' + String(e));
+    return;
+  }
+  const ok = status < 400 && (data ? data.ok !== false : true);
+  if (ok && data && data.filename) {
+    if (!state.stagedFiles.includes(data.filename)) state.stagedFiles.push(data.filename);
+    updateStagedFilesUI();
+    updatePushFileSelect();
+    appendPushStatus('Upload selesai: ' + data.filename + ' (' + (data.bytesTransferred || 0) + ' bytes)');
+  } else {
+    appendPushStatus('Upload gagal: ' + ((data && data.message) || 'tidak diketahui'));
+  }
+  if (progress) progress.style.width = '0%';
+}
+
+async function handleFilePush() {
+  const filename = $('push-file-select') ? $('push-file-select').value : '';
+  const agent = $('push-agent-select') ? $('push-agent-select').value : '';
+  if (!filename) {
+    appendPushStatus('Pilih berkas yang sudah di-stage.');
+    return;
+  }
+  if (!agent) {
+    appendPushStatus('Pilih Agent target.');
+    return;
+  }
+  const res = await api('/api/files/push', { method: 'POST', body: { agentId: agent, filename } });
+  if (res.ok && res.data && res.data.line) {
+    appendPushStatus(res.data.line);
+  } else {
+    appendPushStatus('Push gagal: ' + ((res.data && res.data.message) || 'tidak diketahui'));
+  }
+}
+
+function appendDiagnosticsLog(text) {
+  const out = $('diag-exec-output');
+  if (!out) return;
+  const ts = formatTime(new Date().toISOString());
+  const line = '[' + ts + '] ' + String(text);
+  out.textContent = out.textContent ? out.textContent + '\n' + line : line;
+  out.scrollTop = out.scrollHeight;
+}
+
+function formatSysinfoLabel(key) {
+  const map = {
+    os: 'Os',
+    cores: 'Cores',
+    ram: 'Ram',
+    agentuptime: 'Agent Uptime'
+  };
+  const k = String(key).toLowerCase();
+  return map[k] || key;
+}
+
+async function diagSysinfo() {
+  const sel = $('diag-agent');
+  const agent = sel ? sel.value : '';
+  if (!agent) {
+    appendDiagnosticsLog('Pilih Agent target terlebih dahulu.');
+    return;
+  }
+  const out = $('diag-sysinfo-output');
+  const res = await api('/api/diagnostics/sysinfo', { method: 'POST', body: { agentId: agent } });
+  const lines = [];
+  if (res.ok && res.data && res.data.sysinfo && Object.keys(res.data.sysinfo).length > 0) {
+    Object.entries(res.data.sysinfo).forEach((entry) => {
+      lines.push(formatSysinfoLabel(entry[0]) + ': ' + escapeText(entry[1]));
+    });
+  } else {
+    lines.push('SYSINFO gagal: ' + escapeText((res.data && res.data.message) || 'tidak diketahui'));
+  }
+  if (out) out.textContent = lines.join('\n');
+}
+
+async function diagExec() {
+  const sel = $('diag-agent');
+  const agent = sel ? sel.value : '';
+  const command = $('diag-exec-command').value.trim();
+  if (!agent) {
+    appendDiagnosticsLog('Pilih Agent target terlebih dahulu.');
+    return;
+  }
+  if (!command) {
+    appendDiagnosticsLog('Masukkan perintah terlebih dahulu.');
+    return;
+  }
+  const res = await api('/api/diagnostics/exec', { method: 'POST', body: { agentId: agent, command } });
+  if (res.ok && res.data && res.data.line) {
+    let text = res.data.line.replace(/^200 EXEC [^ ]+ /, '').replace(/\\n/g, '\n');
+    appendDiagnosticsLog(text || '(kosong)');
+  } else {
+    appendDiagnosticsLog('EXEC gagal: ' + escapeText((res.data && res.data.message) || 'tidak diketahui'));
+  }
+}
+
+async function diagPing() {
+  const host = $('diag-ping-host').value.trim();
+  if (!host) return;
+  const res = await api('/api/diagnostics/ping', { method: 'POST', body: { host } });
+  appendDiagnosticsLog('PING ' + escapeText(host) + ' -> ' + escapeText((res.data && res.data.line) || (res.data && res.data.message) || 'gagal'));
+}
+
+async function diagResolve() {
+  const domain = $('diag-resolve-domain').value.trim();
+  if (!domain) return;
+  const res = await api('/api/diagnostics/resolve', { method: 'POST', body: { domain } });
+  appendDiagnosticsLog('RESOLVE ' + escapeText(domain) + ' -> ' + escapeText((res.data && res.data.line) || (res.data && res.data.message) || 'gagal'));
+}
+
 function appendLog(d) {
   const feed = $('log-feed');
   if (!feed) return;
@@ -350,7 +585,13 @@ function connectStream() {
   eventSource.addEventListener('transfer', (e) => {
     let d = null;
     try { d = JSON.parse(e.data); } catch (err) { return; }
-    appendLog({ level: 'INFO', line: 'Transfer ' + (d.direction || '') + ' ' + (d.filename || '') + ' ' + (d.bytesTransferred || 0) + '/' + (d.totalBytes || 0), timestamp: d.timestamp });
+    const msg = 'Transfer ' + (d.direction || '') + ' ' + (d.filename || '') + ' ' + (d.bytesTransferred || 0) + '/' + (d.totalBytes || 0);
+    appendLog({ level: 'INFO', line: msg, timestamp: d.timestamp });
+    const prog = $('upload-progress');
+    if (prog && d.totalBytes) {
+      prog.style.width = Math.min(100, (d.bytesTransferred / d.totalBytes) * 100) + '%';
+    }
+    if (d.direction === 'PUSH') appendPushStatus(msg);
   });
   eventSource.addEventListener('disconnect', (e) => {
     let d = null;
@@ -387,6 +628,7 @@ async function handleLoginSubmit(ev) {
   state.port = body.port;
   state.subscribed = false;
   state.nodes = [];
+  state.stagedFiles = [];
   if (state.role === 'INSPECTOR') {
     showView('inspector');
     updateSessionTag();
@@ -429,6 +671,7 @@ async function disconnect() {
   await api('/api/logout', { method: 'POST', body: {} });
   state.connected = false;
   state.nodes = [];
+  state.stagedFiles = [];
   state.subscribed = false;
   selectedAgent = null;
   history.clear();
@@ -445,5 +688,20 @@ document.addEventListener('DOMContentLoaded', () => {
   if (db) db.addEventListener('click', disconnect);
   const adb = $('agent-disconnect-btn');
   if (adb) adb.addEventListener('click', disconnect);
+  const dp = $('diag-ping-btn');
+  if (dp) dp.addEventListener('click', diagPing);
+  const dr = $('diag-resolve-btn');
+  if (dr) dr.addEventListener('click', diagResolve);
+  const ds = $('diag-sysinfo-btn');
+  if (ds) ds.addEventListener('click', diagSysinfo);
+  const dx = $('diag-exec-btn');
+  if (dx) dx.addEventListener('click', diagExec);
+  document.querySelectorAll('.ws-tab').forEach((b) => {
+    b.addEventListener('click', () => showWorkspaceTab(b.dataset.tab));
+  });
+  const fu = $('file-upload-btn');
+  if (fu) fu.addEventListener('click', handleFileUpload);
+  const fp = $('push-btn');
+  if (fp) fp.addEventListener('click', handleFilePush);
   loadState();
 });
