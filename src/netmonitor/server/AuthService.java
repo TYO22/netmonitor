@@ -18,18 +18,32 @@ import netmonitor.util.FileLogger;
  */
 public final class AuthService {
 
+    /** Data akun tunggal: password dan peran. */
     private static final class Account {
+        /** Password akun. */
         final String password;
+        /** Peran akun (AGENT atau INSPECTOR). */
         final String role;
 
+        /**
+         * @param password password akun
+         * @param role     peran akun
+         */
         Account(String password, String role) {
             this.password = password;
             this.role = role;
         }
     }
 
+    /** Peta username ke akun, diisi dari berkas atau akun bawaan. */
     private final Map<String, Account> accounts = new HashMap<>();
 
+    /**
+     * Membaca akun dari berkas; bila tidak ada atau kosong, memakai akun bawaan demo.
+     *
+     * @param file path berkas users.properties
+     * @param log  pencatat log untuk pesan informasi/pemuatannya
+     */
     public AuthService(String file, FileLogger log) {
         File f = new File(file);
         if (f.isFile()) {
@@ -46,6 +60,12 @@ public final class AuthService {
         }
     }
 
+    /**
+     * Memuat akun dari berkas teks berformat {@code username=password,ROLE}.
+     *
+     * @param f   berkas akun
+     * @param log pencatat log untuk peringatan baris tidak valid
+     */
     private void load(File f, FileLogger log) {
         try (BufferedReader reader = Files.newBufferedReader(f.toPath(), StandardCharsets.UTF_8)) {
             String line;
@@ -74,7 +94,14 @@ public final class AuthService {
         }
     }
 
-    /** True bila username ada, password cocok, dan peran sesuai dengan akun. */
+    /**
+     * Memeriksa apakah username ada, password cocok, dan peran sesuai dengan akun.
+     *
+     * @param username username yang diautentikasi
+     * @param password password yang diautentikasi
+     * @param role     peran yang diminta (AGENT atau INSPECTOR)
+     * @return {@code true} bila semua cocok
+     */
     public boolean authenticate(String username, String password, String role) {
         Account a = accounts.get(username);
         if (a == null) {

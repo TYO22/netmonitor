@@ -45,27 +45,48 @@ import netmonitor.util.FileLogger;
  */
 public class DataTransferService {
 
+    /** Ukuran potongan data untuk transfer berkas (8 KB). */
     private static final int CHUNK_SIZE = 8192;
+    /** Batas waktu token yang belum digunakan sebelum dihapus (ms). */
     private static final long TOKEN_TIMEOUT_MS = 300_000; // 5 menit
 
+    /** Port TCP kanal data. */
     private final int port;
+    /** Direktori penyimpanan berkas unggahan. */
     private final String uploadsDir;
+    /** Pencatat log server. */
     private final FileLogger log;
+    /** Token transfer aktif (key -> state). */
     private final ConcurrentHashMap<String, TransferToken> tokens = new ConcurrentHashMap<>();
+    /** Thread pool untuk menangani koneksi data. */
     private final ExecutorService pool;
+    /** Scheduler pembersihan token kadaluarsa. */
     private final ScheduledExecutorService cleanupScheduler;
+    /** ServerSocket kanal data. */
     private ServerSocket serverSocket;
+    /** Status apakah layanan masih berjalan. */
     private volatile boolean running;
 
     /** State satu transfer aktif. Token bersifat sekali pakai (lihat {@link #consumed}). */
     static final class TransferToken {
+        /** Nama berkas transfer. */
         final String filename;
+        /** Ukuran berkas yang diharapkan (byte). */
         long expectedSize;
+        /** True bila transfer UPLOAD (klien -> server). */
         final boolean isUpload;
+        /** Waktu token dibuat (ms). */
         final long startTime;
+        /** Flag atomik: apakah token sudah terpakai. */
         final AtomicBoolean consumed = new AtomicBoolean(false);
+        /** Future hasil transfer yang dapat ditunggu pemanggil. */
         final CompletableFuture<String> result = new CompletableFuture<>();
 
+        /**
+         * @param filename     nama berkas
+         * @param expectedSize ukuran berkas yang diharapkan
+         * @param isUpload     true bila UPLOAD
+         */
         TransferToken(String filename, long expectedSize, boolean isUpload) {
             this.filename = filename;
             this.expectedSize = expectedSize;
@@ -149,6 +170,12 @@ public class DataTransferService {
      * @param token token transfer
      * @return state token, atau null bila token tidak dikenal/sudah terpakai
      */
+    /**
+     * Menandai token sebagai terpakai (sekali pakai).
+     *
+     * @param token token transfer
+     * @return state token, atau null bila tidak dikenal/sudah terpakai
+     */
     private TransferToken consume(String token) {
         TransferToken tt = tokens.get(token);
         if (tt == null || !tt.consumed.compareAndSet(false, true)) {
@@ -157,7 +184,11 @@ public class DataTransferService {
         return tt;
     }
 
-    /** Menghapus token dari daftar transfer aktif. */
+    /**
+     * Menghapus token dari daftar transfer aktif.
+     *
+     * @param token token transfer yang akan dihapus
+     */
     public void removeToken(String token) {
         tokens.remove(token);
     }
@@ -174,7 +205,11 @@ public class DataTransferService {
         return f.isFile() ? f.length() : -1L;
     }
 
-    /** Menjalankan layanan kanal data: membuka ServerSocket dan thread accept. */
+    /**
+     * Menjalankan layanan kanal data: membuka ServerSocket dan thread accept.
+     *
+     * @throws IOException bila port tidak dapat dipakai
+     */
     public void start() throws IOException {
         serverSocket = new ServerSocket();
         serverSocket.setReuseAddress(true);
@@ -189,7 +224,9 @@ public class DataTransferService {
         acceptThread.start();
     }
 
-    /** Loop utama penerimaan koneksi data; setiap koneksi ditangani di thread pool. */
+    /**
+     * Loop utama penerimaan koneksi data; setiap koneksi ditangani di thread pool.
+     */
     private void acceptLoop() {
         while (running) {
             try {
@@ -357,7 +394,9 @@ public class DataTransferService {
         }
     }
 
-    /** Membersihkan token yang sudah melewati batas waktu tanpa koneksi data masuk. */
+    /**
+     * Membersihkan token yang sudah melewati batas waktu tanpa koneksi data masuk.
+     */
     private void cleanupExpiredTokens() {
         long now = System.currentTimeMillis();
         for (Map.Entry<String, TransferToken> entry : tokens.entrySet()) {
@@ -369,7 +408,9 @@ public class DataTransferService {
         }
     }
 
-    /** Menghentikan layanan kanal data dan melepaskan semua sumber daya. */
+    /**
+     * Menghentikan layanan kanal data dan melepaskan semua sumber daya.
+     */
     public void stop() {
         running = false;
         try {

@@ -8,6 +8,11 @@ package netmonitor.client;
  */
 public class NetMonitorClient {
 
+    /**
+     * Titik masuk program klien NetMonitor.
+     *
+     * @param args argumen: [host port peran username password]
+     */
     public static void main(String[] args) {
         ClientConfig cfg = ConsoleClientUI.promptConfig(args);
         int exitCode = ConsoleClientUI.run(cfg);

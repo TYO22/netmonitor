@@ -28,13 +28,20 @@ public class TelemetryService {
     /** Ambang batas stale bawaan (milidetik). */
     public static final long DEFAULT_STALE_MS = 30_000L;
 
+    /** Pencatat log server. */
     private final FileLogger log;
+    /** Port UDP yang dipakai layanan ini. */
     private final int udpPort;
+    /** Ambang batas stale dalam milidetik. */
     private final long staleMs;
 
+    /** Socket UDP untuk menerima datagram. */
     private DatagramSocket socket;
+    /** Status apakah layanan masih berjalan. */
     private volatile boolean running;
+    /** Thread penerima datagram UDP. */
     private Thread receiverThread;
+    /** Scheduler untuk pemeriksaan status stale. */
     private ScheduledExecutorService staleChecker;
 
     /**
@@ -53,6 +60,9 @@ public class TelemetryService {
         public volatile long lastSeen;
         /** True bila tidak ada telemetri dalam batas staleMs. */
         public volatile boolean stale;
+
+        /** Konstruktor kosong. */
+        public AgentMetrics() { }
     }
 
     /**

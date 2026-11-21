@@ -14,12 +14,23 @@ import java.time.format.DateTimeFormatter;
  */
 public final class FileLogger {
 
+    /** Formatter timestamp yang digunakan pada setiap baris log. */
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
+    /** Penulis buffered ke berkas log. */
     private final BufferedWriter writer;
+    /** Flag apakah baris log juga dicetak ke konsol. */
     private final boolean echoToConsole;
+    /** Flag apakah writer sudah ditutup. */
     private boolean closed;
 
+    /**
+     * Membuka (atau membuat) berkas log dalam mode append.
+     *
+     * @param path          path berkas log yang akan ditulis
+     * @param echoToConsole bila true, setiap baris log juga dicetak ke konsol
+     * @throws IOException bila berkas tidak dapat dibuka
+     */
     public FileLogger(String path, boolean echoToConsole) throws IOException {
         // append = true: log lama tidak ditimpa saat server dijalankan ulang
         this.writer = new BufferedWriter(
@@ -27,18 +38,27 @@ public final class FileLogger {
         this.echoToConsole = echoToConsole;
     }
 
+    /** @param message pesan bertingkat INFO. */
     public void info(String message) {
         write("INFO", message);
     }
 
+    /** @param message pesan bertingkat WARN. */
     public void warn(String message) {
         write("WARN", message);
     }
 
+    /** @param message pesan bertingkat ERROR. */
     public void error(String message) {
         write("ERROR", message);
     }
 
+    /**
+     * Menulis satu baris log dengan timestamp, level, dan nama thread.
+     *
+     * @param level   level log (INFO/WARN/ERROR)
+     * @param message isi pesan
+     */
     private synchronized void write(String level, String message) {
         String line = "[" + LocalDateTime.now().format(TS) + "] [" + level + "] ["
                 + Thread.currentThread().getName() + "] " + message;
@@ -58,6 +78,7 @@ public final class FileLogger {
         }
     }
 
+    /** Menutup penulis log. Setelah ditutup, pemanggilan {@code write} diabaikan. */
     public synchronized void close() {
         if (closed) {
             return;

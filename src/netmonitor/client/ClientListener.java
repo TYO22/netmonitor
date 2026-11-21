@@ -10,10 +10,10 @@ package netmonitor.client;
  */
 public interface ClientListener {
 
-    /** Informasi biasa. */
+    /** @param message informasi biasa. */
     void onInfo(String message);
 
-    /** Galat atau peringatan yang dapat dibaca pengguna. */
+    /** @param message galat atau peringatan yang dapat dibaca pengguna. */
     void onError(String message);
 
     /**
@@ -24,10 +24,10 @@ public interface ClientListener {
      */
     void onConnected(String loginResponse, boolean reconnected);
 
-    /** Baris dari server yang bukan jawaban sebuah perintah (mis. pemberitahuan). */
+    /** @param line baris dari server yang bukan jawaban sebuah perintah (mis. pemberitahuan). */
     void onServerMessage(String line);
 
-    /** Pesan chat masuk dari server (BCAST / MSG) yang bukan jawaban perintah aktif. */
+    /** @param line pesan chat masuk dari server (BCAST / MSG) yang bukan jawaban perintah aktif. */
     void onChatMessage(String line);
 
     /**

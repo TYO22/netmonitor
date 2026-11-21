@@ -14,13 +14,23 @@ public final class ConsoleClientUI implements ClientListener {
     private final boolean agent;
     private ClientEngine engine;
 
+    /**
+     * Membuat tampilan konsol.
+     *
+     * @param agent true bila klien berperan AGENT
+     */
     private ConsoleClientUI(boolean agent) {
         this.agent = agent;
     }
 
     // ------------------------------------------------------------------ pengaturan dari argumen atau tanya-jawab
 
-    /** Membaca pengaturan dari argumen baris perintah, atau menanyakannya satu per satu (dengan validasi). */
+    /**
+     * Membaca pengaturan dari argumen baris perintah, atau menanyakannya satu per satu (dengan validasi).
+     *
+     * @param args argumen baris perintah: [host port peran username password]
+     * @return konfigurasi klien yang sudah tervalidasi
+     */
     public static ClientConfig promptConfig(String[] args) {
         // Jika menggunakan argumen baris perintah (CLI args)
         if (args.length >= 5) {
@@ -77,7 +87,12 @@ public final class ConsoleClientUI implements ClientListener {
         return new ClientConfig(host, port, role, user, pass);
     }
 
-    /** Membaca satu baris input; jika input ditutup (EOF) program berhenti dengan pesan, bukan crash. */
+    /**
+     * Membaca satu baris input dari keyboard; jika input ditutup (EOF) program berhenti dengan pesan.
+     *
+     * @param prompt teks prompt yang ditampilkan
+     * @return input pengguna yang telah dibersihkan spasi di tepi
+     */
     private static String readInput(String prompt) {
         System.out.print(prompt);
         if (!STDIN.hasNextLine()) {
@@ -90,8 +105,10 @@ public final class ConsoleClientUI implements ClientListener {
 
     /**
      * Mem-parsing string menjadi port.
+     * @param s string yang akan diparsing
      * @param fatal Jika true, aplikasi berhenti (System.exit) jika format salah.
      *              Jika false, mengembalikan -1 untuk ditangani oleh pemanggil.
+     * @return port yang valid, atau -1 bila input tidak valid dan fatal = false
      */
     private static int parsePort(String s, boolean fatal) {
         try {
@@ -108,6 +125,11 @@ public final class ConsoleClientUI implements ClientListener {
         return -1;
     }
 
+    /**
+     * Mencetak pesan ke stderr dan menghentikan program.
+     *
+     * @param message pesan kesalahan
+     */
     private static void fail(String message) {
         System.err.println(message);
         System.exit(1);
@@ -115,13 +137,23 @@ public final class ConsoleClientUI implements ClientListener {
 
     // ------------------------------------------------------------------ alur program
 
-    /** Menjalankan klien sesuai peran. @return kode keluar proses. */
+    /**
+     * Menjalankan klien sesuai peran.
+     *
+     * @param cfg konfigurasi klien
+     * @return kode keluar proses
+     */
     public static int run(ClientConfig cfg) {
         ConsoleClientUI ui = new ConsoleClientUI(cfg.isAgent());
         ui.engine = new ClientEngine(cfg, ui);
         return cfg.isAgent() ? ui.runAgent() : ui.runInspector();
     }
 
+    /**
+     * Menjalankan mode Agent: membaca ketikan 'quit'/'exit' lalu menjalankan mesin Agent.
+     *
+     * @return kode keluar dari mesin Agent
+     */
     private int runAgent() {
         // Thread kecil membaca ketikan 'quit'/'exit' selama Agent hidup (termasuk saat sambung ulang).
         Thread console = new Thread(() -> {
@@ -138,6 +170,11 @@ public final class ConsoleClientUI implements ClientListener {
         return engine.runAgent();
     }
 
+    /**
+     * Menjalankan mode Inspector: menyambung ke server lalu membaca perintah dari pengguna.
+     *
+     * @return kode keluar proses
+     */
     private int runInspector() {
         if (!engine.connect()) {
             return 1;
@@ -228,16 +265,24 @@ public final class ConsoleClientUI implements ClientListener {
 
     // ------------------------------------------------------------------ kejadian dari mesin jaringan
 
+    /** @param message informasi biasa yang akan dicetak ke konsol. */
     @Override
     public void onInfo(String message) {
         System.out.println(message);
     }
 
+    /** @param message galat atau peringatan yang akan dicetak ke stderr. */
     @Override
     public void onError(String message) {
         System.err.println(message);
     }
 
+    /**
+     * Mencetak respons login ke konsol.
+     *
+     * @param loginResponse isi respons server
+     * @param reconnected   true bila ini hasil sambung ulang otomatis
+     */
     @Override
     public void onConnected(String loginResponse, boolean reconnected) {
         System.out.println("Server: " + loginResponse);
@@ -249,17 +294,27 @@ public final class ConsoleClientUI implements ClientListener {
         }
     }
 
+    /** @param line baris dari server yang bukan jawaban perintah. */
     @Override
     public void onServerMessage(String line) {
         System.out.println("[Server] " + line);
     }
 
+    /** @param line pesan chat masuk dari server (BCAST / MSG). */
     @Override
     public void onChatMessage(String line) {
         // Pesan chat masuk (BCAST / MSG): tampilkan di bawah prompt tanpa menghapus input pengguna.
         System.out.println("[Chat] " + line);
     }
 
+    /**
+     * Mencetak ringkasan telemetri UDP dari server.
+     *
+     * @param agentId    identitas Agent
+     * @param cpuLoad    beban CPU (0.0 - 1.0, -1.0 bila tidak tersedia)
+     * @param memPercent persentase penggunaan memori (0 - 100)
+     * @param seqNum     nomor urut paket
+     */
     @Override
     public void onTelemetry(String agentId, double cpuLoad, double memPercent, int seqNum) {
         // Telemetri UDP dari server: ringkasan singkat di konsol Inspector.
@@ -285,6 +340,13 @@ public final class ConsoleClientUI implements ClientListener {
         }
     }
 
+    /**
+     * Menangani koneksi terputus: tampilkan pesan dan hentikan program.
+     *
+     * @param reason        penyebab yang sudah berupa kalimat mudah dibaca
+     * @param willReconnect true bila mesin akan mencoba menyambung ulang
+     * @param byServer      true bila server sendiri yang memberi tahu
+     */
     @Override
     public void onConnectionLost(String reason, boolean willReconnect, boolean byServer) {
         if (willReconnect) {
@@ -300,12 +362,20 @@ public final class ConsoleClientUI implements ClientListener {
         System.exit(2);
     }
 
+    /**
+     * Menampilkan pemberitahuan percobaan sambung ulang.
+     *
+     * @param attempt    nomor percobaan
+     * @param maxAttempts jumlah maksimal percobaan
+     * @param delayMs     jeda sebelum percobaan berikutnya (ms)
+     */
     @Override
     public void onReconnecting(int attempt, int maxAttempts, long delayMs) {
         System.out.println("Mencoba menyambung ulang dalam " + (delayMs / 1000.0) + " detik (percobaan "
                 + attempt + "/" + maxAttempts + "). Ketik 'quit' atau 'exit' untuk berhenti.");
     }
 
+    /** Menampilkan daftar perintah yang tersedia. */
     public void showHelp() {
         System.out.println("\nPerintah yang tersedia:");
         System.out.println("  LOGIN <role> <user> <pass>");

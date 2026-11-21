@@ -44,22 +44,46 @@ public final class GeoIpService {
     private final boolean lookupPrivate;
     private final FileLogger log;
 
-    /** Hasil satu pencarian: lokasi (jika berhasil) atau alasan kegagalan. */
+    /**
+     * Hasil satu pencarian lokasi: lokasi (jika berhasil) atau alasan kegagalan.
+     * Disimpan sebagai Outcome karena kegagalan tidak menghentikan sesi login.
+     */
     private static final class Outcome {
+        /** Lokasi hasil pencarian (null bila gagal). */
         final String location;
+        /** DTO hasil pencarian (null bila gagal). */
         final GeoLocationDTO dto;
+        /** Alasan kegagalan (null bila berhasil). */
         final String reason;
 
+        /**
+         * @param location hasil lokasi atau null
+         * @param dto      DTO hasil pencarian atau null
+         * @param reason   alasan kegagalan atau null
+         */
         private Outcome(String location, GeoLocationDTO dto, String reason) {
             this.location = location;
             this.dto = dto;
             this.reason = reason;
         }
 
+        /**
+         * Membuat hasil pencarian yang berhasil.
+         *
+         * @param location lokasi yang berhasil ditemukan
+         * @param dto      DTO hasil pencarian
+         * @return Outcome hasil berhasil
+         */
         static Outcome ok(String location, GeoLocationDTO dto) {
             return new Outcome(location, dto, null);
         }
 
+        /**
+         * Membuat hasil pencarian yang gagal.
+         *
+         * @param reason alasan kegagalan
+         * @return Outcome hasil gagal
+         */
         static Outcome fail(String reason) {
             return new Outcome(null, null, reason);
         }
@@ -70,29 +94,45 @@ public final class GeoIpService {
      * display = teks untuk respons LOGIN; node/region/isp = keterangan "node" yang tampil pada perintah LIST.
      */
     public static final class Result {
+        /** Teks ringkas untuk respons LOGIN. */
         private final String display;
+        /** Nama region atau lokasi untuk ditampilkan pada LIST. */
         private final String node;
+        /** Penyedia internet node. */
         private final String isp;
 
+        /**
+         * @param display teks ringkas untuk respons LOGIN
+         * @param node    nama region/lokasi untuk LIST
+         * @param isp     penyedia internet node
+         */
         Result(String display, String node, String isp) {
             this.display = display;
             this.node = node;
             this.isp = isp;
         }
 
+        /** @return teks ringkas untuk respons LOGIN. */
         public String getDisplay() {
             return display;
         }
 
+        /** @return nama region atau lokasi untuk LIST. */
         public String getNode() {
             return node;
         }
 
+        /** @return penyedia internet node. */
         public String getIsp() {
             return isp;
         }
     }
 
+    /**
+     * Membuat layanan GeoIP.
+     *
+     * @param log pencatat log server
+     */
     public GeoIpService(FileLogger log) {
         this.log = log;
         // dapat diganti saat pengujian: -Dnetmonitor.geoip.url=http://localhost:8000/%s
@@ -100,7 +140,13 @@ public final class GeoIpService {
         this.lookupPrivate = Boolean.getBoolean("netmonitor.geoip.lookupPrivate");
     }
 
-    /** Mencari lokasi klien. Hasil memuat teks untuk LOGIN dan keterangan node untuk LIST. Tidak pernah melempar exception. */
+    /**
+     * Mencari lokasi klien. Hasil memuat teks untuk LOGIN dan keterangan node untuk LIST.
+     * Tidak pernah melempar exception; kegagalan dilaporkan sebagai teks alasan.
+     *
+     * @param address alamat IP klien
+     * @return hasil pencarian lokasi (berhasil atau gagal dengan alasan)
+     */
     public Result lookup(InetAddress address) {
         boolean local = NetUtil.isLocal(address);
         String realIp = address.getHostAddress().split("%")[0];
@@ -123,7 +169,12 @@ public final class GeoIpService {
         return new Result(display, local ? LOCAL : UNKNOWN, "");
     }
 
-    /** Membatasi total waktu pencarian, karena DNS bisa macet di luar kendali timeout HTTP. */
+    /**
+     * Membatasi total waktu pencarian, karena DNS bisa macet di luar kendali timeout HTTP.
+     *
+     * @param ip alamat IP yang akan dicari (boleh kosong)
+     * @return hasil pencarian (berhasil atau gagal)
+     */
     private Outcome queryWithDeadline(String ip) {
         try {
             return NetUtil.callWithTimeout(() -> query(ip), DEADLINE_MS);
@@ -135,7 +186,12 @@ public final class GeoIpService {
         }
     }
 
-    /** Menangani proses HTTP, membaca JSON, dan mengklasifikasikan kegagalan. */
+    /**
+     * Menangani proses HTTP, membaca JSON, dan mengklasifikasikan kegagalan.
+     *
+     * @param ip alamat IP yang akan dikirim ke layanan GeoIP
+     * @return hasil pencarian (berhasil atau gagal dengan alasan yang jelas)
+     */
     private Outcome query(String ip) {
         HttpURLConnection conn = null;
         try {
@@ -214,6 +270,12 @@ public final class GeoIpService {
         }
     }
 
+    /**
+     * Mendeskripsikan kode respons HTTP dari layanan GeoIP.
+     *
+     * @param status kode respons HTTP
+     * @return deskripsi singkat kode tersebut
+     */
     private static String describeHttp(int status) {
         if (status == 429) {
             return "batas permintaan layanan lokasi terlampaui (HTTP 429)";

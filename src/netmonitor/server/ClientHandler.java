@@ -35,45 +35,81 @@ import netmonitor.util.NetUtil;
  */
 public class ClientHandler implements Runnable {
 
+    /** Batas waktu menunggu LOGIN sebelum sesi diputus (ms). */
     private static final int PRELOGIN_TIMEOUT_MS = 30_000;       // batas menunggu LOGIN
+    /** Jumlah maksimal percobaan login gagal sebelum sesi diputus. */
     private static final int MAX_LOGIN_ATTEMPTS = 3;
+    /** Batas tunggu balasan Agent atas permintaan server (ms). */
     private static final int AGENT_REPLY_TIMEOUT_MS = 5_000;
+    /** Batas waktu ping host (ms). */
     private static final int PING_TIMEOUT_MS = 3_000;
+    /** Batas waktu resolusi DNS (ms). */
     private static final int DNS_TIMEOUT_MS = 4_000;
+    /** Panjang maksimum teks BROADCAST. */
     private static final int MAX_BROADCAST_TEXT_LENGTH = 500;   // panjang maksimal teks BROADCAST
+    /** Panjang maksimum teks MSG. */
     private static final int MAX_MSG_TEXT_LENGTH = 500;        // panjang maksimal teks MSG
+    /** Batas waktu keseluruhan transfer berkas di kanal data (ms). */
     private static final long TRANSFER_TIMEOUT_MS = Long.getLong("netmonitor.transfer.timeout", 300_000L);
 
+    /** Soket koneksi klien. */
     private final Socket socket;
+    /** Server yang memiliki handler ini. */
     private final NetMonitorServer server;
+    /** Pencatat log server. */
     private final FileLogger log;
+    /** Alamat remote klien untuk keperluan log. */
     private final String remote;
+    /** Kunci penulisan: menjamin urutan baris respons tidak tercampur. */
     private final Object writeLock = new Object();
+    /** Permintaan ke Agent yang sedang menunggu balasan (id -> future). */
     private final Map<String, CompletableFuture<String>> pending = new ConcurrentHashMap<>();
+    /** Penghasil id permintaan yang unik dan monoton naik. */
     private final AtomicLong requestSeq = new AtomicLong();
 
+    /** Pembaca baris masuk dari klien. */
     private BufferedReader in;
+    /** Penulis baris keluar ke klien. */
     private BufferedWriter out;
+    /** Username klien yang sedang login (null bila belum login). */
     private volatile String username;
+    /** Peran klien (AGENT/INSPECTOR). */
     private volatile String role;
+    /** Flag apakah sesi sedang/sudah ditutup. */
     private volatile boolean closing;
+    /** Waktu data terakhir dari klien (termasuk HBACK). */
     private volatile long lastReceived = System.currentTimeMillis();   // data apa pun dari klien (termasuk HBACK)
+    /** Waktu perintah nyata terakhir dari klien. */
     private volatile long lastActivity = System.currentTimeMillis();   // perintah nyata dari klien
+    /** Flag sedang menunggu transfer berkas di kanal data. */
     private volatile boolean transferring;   // menunggu transfer berkas di kanal data
+    /** Jumlah percobaan login gagal beruntun. */
     private int failedLogins;
+    /** Hasil GeoIP klien, tampil pada perintah LIST. */
     private volatile GeoIpService.Result geo;   // lokasi node (Pilar 4: pemetaan node), tampil pada LIST
 
     /** Kegagalan permintaan ke Agent, lengkap dengan kode respons untuk Inspector. */
     private static final class AgentException extends Exception {
         private static final long serialVersionUID = 1L;
+        /** Kode respons yang akan dikirimkan ke Inspector. */
         final int code;
 
+        /**
+         * @param code    kode respons
+         * @param message pesan kegagalan
+         */
         AgentException(int code, String message) {
             super(message);
             this.code = code;
         }
     }
 
+    /**
+     * Membuat handler untuk satu koneksi klien.
+     *
+     * @param socket soket koneksi klien
+     * @param server server yang menjalankan handler ini
+     */
     public ClientHandler(Socket socket, NetMonitorServer server) {
         this.socket = socket;
         this.server = server;
@@ -81,20 +117,28 @@ public class ClientHandler implements Runnable {
         this.remote = String.valueOf(socket.getRemoteSocketAddress());
     }
 
+    /** @return username klien yang sedang login, atau null. */
     public String getUsername() {
         return username;
     }
 
+    /** @return true bila klien berperan AGENT. */
     public boolean isAgent() {
         return Protocol.ROLE_AGENT.equals(role);
     }
 
+    /** @return true bila klien berperan INSPECTOR. */
     private boolean isInspector() {
         return Protocol.ROLE_INSPECTOR.equals(role);
     }
 
     // ------------------------------------------------------------------ siklus hidup
 
+    /** 
+     * Siklus hidup handler: membaca perintah dari klien hingga koneksi terputus atau QUIT.
+     * Setiap kegagalan dihandle dengan kode respons yang mencantumkan penyebabnya.
+     * Jalankan oleh thread pool server (tidak terbentuk per-thread untuk koneksi).
+     */
     @Override
     public void run() {
         log.info("Koneksi masuk dari " + remote);
@@ -138,6 +182,7 @@ public class ClientHandler implements Runnable {
         }
     }
 
+    /** Melepaskan sumber daya sesi: hapus dari peta sesi, batalkan permintaan tertunda, tutup soket. */
     private void cleanup() {
         String user = username;
         if (user != null) {
@@ -157,6 +202,7 @@ public class ClientHandler implements Runnable {
         server.onHandlerFinished(this);
     }
 
+    /** Menutup soket dengan aman, mengabaikan IOException. */
     private void closeSocket() {
         try {
             socket.close();
@@ -165,13 +211,18 @@ public class ClientHandler implements Runnable {
         }
     }
 
-    /** Memberi tahu klien alasan penutupan, lalu memutus koneksi (dipakai saat server dimatikan, dsb). */
+    /**
+     * Memberi tahu klien alasan penutupan, lalu memutus koneksi (dipakai saat server dimatikan, dsb).
+     *
+     * @param message pesan yang akan dikirim ke klien
+     */
     public void notifyAndClose(String message) {
         closing = true;
         trySend(message);
         closeSocket();
     }
 
+    /** Menandai klien mati dan menutup soket dengan alasan yang diberikan. */
     private void dropDeadPeer(String why) {
         log.warn("Koneksi dianggap putus (" + describe() + "): " + why + ". Sesi dibersihkan");
         closing = true;
@@ -182,6 +233,9 @@ public class ClientHandler implements Runnable {
      * Dipanggil berkala oleh server: (1) mengirim HB lalu memeriksa apakah klien masih menjawab, sehingga
      * koneksi yang putus diam-diam (Wi-Fi mati, laptop tidur, kabel dicabut) cepat terdeteksi dan sesinya
      * dibersihkan; (2) menutup sesi Inspector yang tidak aktif terlalu lama.
+     *
+     * @param timeoutMs       batas waktu no-signal untuk dianggap putus (ms)
+     * @param inspectorIdleMs batas waktu aktivitas tidak terhadap Inspector (ms)
      */
     void heartbeat(long timeoutMs, long inspectorIdleMs) {
         if (username == null || closing) {
@@ -216,11 +270,17 @@ public class ClientHandler implements Runnable {
         }
     }
 
+    /** @return deskripsi singkat sesi untuk keperluan log. */
     private String describe() {
         return username == null ? remote : username + "/" + role + "@" + remote;
     }
 
-    /** Mengubah exception jaringan menjadi kalimat penyebab yang mudah dibaca (untuk log). */
+    /**
+     * Mengubah exception jaringan menjadi kalimat penyebab yang mudah dibaca (untuk log).
+     *
+     * @param e exception jaringan
+     * @return deskripsi penyebab kegagalan
+     */
     static String describeIo(IOException e) {
         String m = String.valueOf(e.getMessage()).toLowerCase();
         if (m.contains("connection reset") || m.contains("forcibly closed")) {
@@ -237,6 +297,12 @@ public class ClientHandler implements Runnable {
 
     // ------------------------------------------------------------------ pengiriman
 
+    /**
+     * Mengirim satu baris ke klien dengan penguncian penulisan.
+     *
+     * @param line baris yang akan dikirim
+     * @throws IOException bila terjadi kesalahan I/O
+     */
     private void send(String line) throws IOException {
         synchronized (writeLock) {
             Protocol.writeLine(out, line);
@@ -246,6 +312,11 @@ public class ClientHandler implements Runnable {
         }
     }
 
+    /**
+     * Mencoba mengirim baris ke klien, menelan IOException bila klien sudah pergi.
+     *
+     * @param line baris yang akan dikirim
+     */
     private void trySend(String line) {
         try {
             if (out != null) {
@@ -258,7 +329,13 @@ public class ClientHandler implements Runnable {
 
     // ------------------------------------------------------------------ dispatcher
 
-    /** @return false bila sesi harus diakhiri. */
+    /**
+     * Memproses satu baris perintah dari klien.
+     *
+     * @param raw baris mentah dari klien
+     * @return {@code false} bila sesi harus diakhiri, {@code true} bila sesi berlanjut
+     * @throws IOException bila terjadi kesalahan I/O saat menulis respons
+     */
     private boolean handleLine(String raw) throws IOException {
         String line = raw.trim();
         if (line.isEmpty() || line.equals(Protocol.HEARTBEAT_ACK)) {
@@ -321,6 +398,13 @@ public class ClientHandler implements Runnable {
         }
     }
 
+    /**
+     * Memproses perintah LOGIN: validasi kredensial, lookup GeoIP, daftarkan sesi.
+     *
+     * @param p token perintah, p[1] peran, p[2] username, p[3] password
+     * @return {@code true} bila sesi berlanjut, {@code false} bila sesi ditutup (login gagal total)
+     * @throws IOException bila terjadi kesalahan I/O saat menulis respons
+     */
     private boolean doLogin(String[] p) throws IOException {
         if (username != null) {
             send(Protocol.err(400, "Sudah Login"));
@@ -378,6 +462,12 @@ public class ClientHandler implements Runnable {
         return true;
     }
 
+    /**
+     * Memeriksa apakah klien sudah login dan berperan INSPECTOR.
+     *
+     * @return {@code true} bila klien INSPECTOR yang terautentikasi
+     * @throws IOException bila terjadi kesalahan I/O saat menulis respons
+     */
     private boolean requireInspector() throws IOException {
         if (username == null) {
             send(Protocol.err(401, "Belum Login"));
@@ -393,6 +483,8 @@ public class ClientHandler implements Runnable {
     /**
      * LIST (Pilar 2): daftar semua pengguna aktif, dapat dipakai SEMUA peran yang sudah login.
      * Setiap entri berformat "username | PERAN | lokasi | isp" dan dipisah " ; " (tetap satu baris respons).
+     *
+     * @throws IOException bila terjadi kesalahan I/O saat menulis respons
      */
     private void doList() throws IOException {
         if (username == null) {
@@ -406,7 +498,11 @@ public class ClientHandler implements Runnable {
         send(Protocol.ok("USERS [" + String.join(" ; ", users) + "]"));
     }
 
-    /** Entri satu pengguna untuk LIST; karakter pemisah dibersihkan agar format tidak rusak. */
+    /**
+     * Entri satu pengguna untuk LIST; karakter pemisah dibersihkan agar format tidak rusak.
+     *
+     * @return string deskripsi pengguna untuk LIST
+     */
     private String describeForList() {
         GeoIpService.Result g = geo;
         String loc = g == null ? "-" : listField(g.getNode());
@@ -414,11 +510,23 @@ public class ClientHandler implements Runnable {
         return username + " | " + role + " | " + loc + " | " + isp;
     }
 
+    /**
+     * Membersihkan sebuah kolom untuk perintah LIST.
+     *
+     * @param value nilai kolom mentah
+     * @return nilai aman maksimal 80 karakter, atau "-" bila kosong
+     */
     private static String listField(String value) {
         String v = Protocol.clean(value.replaceAll("[|;\\[\\]]", " "), 80);
         return v.isEmpty() ? "-" : v;
     }
 
+    /**
+     * Memproses perintah SYSINFO: meminta data sistem dari Agent tujuan.
+     *
+     * @param p token perintah, p[1] agentId
+     * @throws IOException bila terjadi kesalahan I/O saat menulis respons
+     */
     private void doSysinfo(String[] p) throws IOException {
         if (!requireInspector()) {
             return;
@@ -440,6 +548,12 @@ public class ClientHandler implements Runnable {
         }
     }
 
+    /**
+     * Memproses perintah PING: menguji jangkauan host dari sisi server.
+     *
+     * @param p token perintah, p[1] host tujuan
+     * @throws IOException bila terjadi kesalahan I/O saat menulis respons
+     */
     private void doPing(String[] p) throws IOException {
         if (!requireInspector()) {
             return;
@@ -468,6 +582,12 @@ public class ClientHandler implements Runnable {
         }
     }
 
+    /**
+     * Memproses perintah RESOLVE: resolusi DNS atas host yang diminta.
+     *
+     * @param p token perintah, p[1] host/domain
+     * @throws IOException bila terjadi kesalahan I/O saat menulis respons
+     */
     private void doResolve(String[] p) throws IOException {
         if (!requireInspector()) {
             return;
@@ -501,7 +621,11 @@ public class ClientHandler implements Runnable {
 
     /**
      * Dipanggil dari thread Inspector: meminta info sistem ke Agent ini.
-     * Server mengirim "REQ <id> SYSINFO", Agent membalas "RES <id> <data>".
+     * Server mengirim "REQ &lt;id&gt; SYSINFO", Agent membalas "RES &lt;id&gt; &lt;data&gt;".
+     *
+     * @param timeoutMs batas waktu menunggu balasan dari Agent (ms)
+     * @return data sistem yang dilaporkan Agent
+     * @throws AgentException bila Agent gagal, timeout, atau terputus
      */
     private String requestSysinfo(long timeoutMs) throws AgentException {
         String id = Long.toString(requestSeq.incrementAndGet());
@@ -568,6 +692,11 @@ public class ClientHandler implements Runnable {
         }
     }
 
+    /**
+     * Memproses balasan Agent (RES &lt;id&gt; &lt;data&gt;) dan menyelesaikan future yang menunggu.
+     *
+     * @param line baris respons mentah dari Agent
+     */
     private void handleAgentResponse(String line) {
         String[] parts = line.split("\\s+", 3);
         CompletableFuture<String> f = parts.length >= 2 ? pending.get(parts[1]) : null;

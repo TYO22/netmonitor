@@ -67,6 +67,12 @@ public class NetMonitorServer {
     private ServerSocket serverSocket;
     private volatile boolean running;
 
+    /**
+     * Membuat server NetMonitor pada port tertentu dengan pencatat log yang diberikan.
+     *
+     * @param port port TCP server
+     * @param log  pencatat log server
+     */
     public NetMonitorServer(int port, FileLogger log) {
         this.port = port;
         this.dataPort = DATA_PORT_DEFAULT;
@@ -78,14 +84,17 @@ public class NetMonitorServer {
         this.dataTransfer = new DataTransferService(dataPort, uploadsDir, log);
     }
 
+    /** @return pencatat log yang dipakai server. */
     public FileLogger getLogger() {
         return log;
     }
 
+    /** @return layanan otentikasi server. */
     public AuthService getAuth() {
         return auth;
     }
 
+    /** @return layanan GeoIP server. */
     public GeoIpService getGeo() {
         return geo;
     }
@@ -110,17 +119,28 @@ public class NetMonitorServer {
         return uploadsDir;
     }
 
+    /** @return peta sesi aktif (username -> handler), thread-safe. */
     public ConcurrentHashMap<String, ClientHandler> getSessions() {
         return sessions;
     }
 
-    /** Dipanggil handler (tepat sekali) saat sesinya berakhir: bebaskan satu slot. */
+    /**
+     * Dipanggil handler (tepat sekali) saat sesinya berakhir: bebaskan satu slot klien.
+     *
+     * @param h handler yang sesinya berakhir
+     */
     void onHandlerFinished(ClientHandler h) {
         if (handlers.remove(h)) {
             activeClients.decrementAndGet();
         }
     }
 
+    /**
+     * Menjalankan server: membuka ServerSocket, menjadwalkan heartbeat, mengaktifkan layanan UDP/data,
+     * lalu menerima koneksi klien sampai dihentikan.
+     *
+     * @throws IOException bila port tidak dapat dipakai atau terjadi kesalahan I/O
+     */
     public void start() throws IOException {
         serverSocket = new ServerSocket();
         serverSocket.setReuseAddress(true);               // SO_REUSEADDR
@@ -178,6 +198,11 @@ public class NetMonitorServer {
         }
     }
 
+    /**
+     * Menolak koneksi baru ketika server sudah penuh.
+     *
+     * @param client soket klien yang ditolak
+     */
     private void reject(Socket client) {
         log.warn("Koneksi ditolak (server penuh): " + client.getRemoteSocketAddress());
         try (Socket s = client;
@@ -189,6 +214,7 @@ public class NetMonitorServer {
         }
     }
 
+    /** Menunggu sebentar untuk menghindari loop sibuk bila accept() gagal terus-menerus. */
     private void pause() {
         try {
             Thread.sleep(100);   // cegah loop sibuk bila accept() gagal terus-menerus
@@ -197,6 +223,7 @@ public class NetMonitorServer {
         }
     }
 
+    /** Menghentikan server: tutup soket, layanan, dan sampaikan alasan penutupan ke klien. */
     public synchronized void stop() {
         if (!running) {
             return;
@@ -220,6 +247,11 @@ public class NetMonitorServer {
         log.close();
     }
 
+    /**
+     * Titik masuk program server NetMonitor.
+     *
+     * @param args argumen baris perintah: [port] [berkas-log]
+     */
     public static void main(String[] args) {
         int port = Protocol.DEFAULT_PORT;
         String logFile = "netmonitor.log";

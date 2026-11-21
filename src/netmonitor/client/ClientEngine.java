@@ -78,6 +78,12 @@ public final class ClientEngine {
     private volatile ScheduledExecutorService telemetryScheduler;
     private final AtomicInteger telemetrySeq = new AtomicInteger();
 
+    /**
+     * Membuat mesin jaringan klien.
+     *
+     * @param cfg pengaturan koneksi klien
+     * @param ui  listener kejadian (tampilan konsol/GUI)
+     */
     public ClientEngine(ClientConfig cfg, ClientListener ui) {
         this.cfg = cfg;
         this.ui = ui;
@@ -86,12 +92,20 @@ public final class ClientEngine {
     // ------------------------------------------------------------------ validasi & resolusi host
 
     /** Hasil validasi host: alamat bila berhasil, atau pesan kesalahan. */
+    /** Hasil validasi host: alamat bila berhasil, atau pesan kesalahan. */
     public static final class HostResult {
+        /** Alamat IP hasil resolusi (null bila gagal). */
         public InetAddress address;
+        /** Pesan kesalahan (null bila berhasil). */
         public String error;
     }
 
-    /** Validasi format + resolusi DNS dengan batas waktu, lengkap dengan penyebab kegagalan yang jelas. */
+    /**
+     * Validasi format + resolusi DNS dengan batas waktu, lengkap dengan penyebab kegagalan yang jelas.
+     *
+     * @param host nama host yang akan divalidasi dan diresolusi
+     * @return hasil validasi/resolusi (alamat atau pesan kesalahan)
+     */
     public static HostResult resolveHost(String host) {
         HostResult r = new HostResult();
         if (!NetUtil.isValidFormat(host)) {
@@ -114,7 +128,11 @@ public final class ClientEngine {
         return r;
     }
 
-    /** Validasi host server dan uji jangkauan (hanya peringatan). @return alamat, atau null jika host tidak dapat dipakai. */
+    /**
+     * Validasi host server dan uji jangkauan (hanya peringatan).
+     *
+     * @return alamat, atau null jika host tidak dapat dipakai
+     */
     private InetAddress prepare() {
         HostResult hr = resolveHost(cfg.getHost());
         if (hr.error != null) {
@@ -136,13 +154,25 @@ public final class ClientEngine {
     // ------------------------------------------------------------------ API untuk lapisan tampilan
 
     /** Hasil sebuah permintaan perintah (mode Inspector). */
+    /** Hasil sebuah permintaan perintah (mode Inspector). */
     public static final class Result {
+        /** Status perintah. */
         public enum Status { OK, TIMEOUT, LOST }
 
+        /** Status perintah. */
         public final Status status;
+        /** Baris respons dari server. */
         public final String line;
+        /** True bila perintah adalah QUIT/EXIT. */
         public final boolean quitting;
 
+        /**
+         * Membuat hasil perintah.
+         *
+         * @param status status perintah
+         * @param line   baris respons
+         * @param quitting true bila perintah adalah QUIT/EXIT
+         */
         private Result(Status status, String line, boolean quitting) {
             this.status = status;
             this.line = line;
@@ -173,7 +203,12 @@ public final class ClientEngine {
         }
     }
 
-    /** Mengirim satu perintah dan menunggu jawabannya (paling lama RESPONSE_TIMEOUT_MS). */
+    /**
+     * Mengirim satu perintah dan menunggu jawabannya (paling lama RESPONSE_TIMEOUT_MS).
+     *
+     * @param command perintah yang akan dikirim ke server
+     * @return hasil perintah (status, baris respons, quitting)
+     */
     public Result request(String command) {
         Connection c = current;
         if (c == null || c.lost) {
@@ -406,7 +441,9 @@ public final class ClientEngine {
         }
     }
 
-    /** Pengguna meminta berhenti (Agent): kirim QUIT bila masih terhubung dan hentikan sambung ulang. */
+    /**
+     * Pengguna meminta berhenti (Agent): kirim QUIT bila masih terhubung dan hentikan sambung ulang.
+     */
     public void requestQuit() {
         quitRequested = true;
         stopTelemetrySender();
@@ -421,7 +458,9 @@ public final class ClientEngine {
         }
     }
 
-    /** Menutup koneksi saat ini dengan rapi (shutdownOutput lalu close). */
+    /**
+     * Menutup koneksi saat ini dengan rapi (shutdownOutput lalu close).
+     */
     public void close() {
         Connection c = current;
         if (c != null) {
@@ -429,6 +468,11 @@ public final class ClientEngine {
         }
     }
 
+    /**
+     * Menunggu selama ms milidetik, memulihkan flag interrupt bila dibatalkan.
+     *
+     * @param ms lama waktu tunggu (ms)
+     */
     private static void sleep(long ms) {
         try {
             Thread.sleep(ms);
@@ -442,15 +486,26 @@ public final class ClientEngine {
     /** Kegagalan yang sudah dijelaskan dengan bahasa yang mudah dipahami. */
     private static final class ClientError extends Exception {
         private static final long serialVersionUID = 1L;
+        /** True bila operasi dapat dicoba ulang. */
         final boolean retryable;
 
+        /**
+         * @param message   pesan kesalahan
+         * @param retryable true bila operasi dapat dicoba ulang
+         */
         ClientError(String message, boolean retryable) {
             super(message);
             this.retryable = retryable;
         }
     }
 
-    /** Membuka soket (dengan connect timeout), lalu login. */
+    /**
+     * Membuka soket (dengan connect timeout), lalu login.
+     *
+     * @param address alamat server
+     * @return koneksi yang sudah login
+     * @throws ClientError bila sambungan atau login gagal
+     */
     private Connection open(InetAddress address) throws ClientError {
         String host = cfg.getHost();
         int port = cfg.getPort();
@@ -492,6 +547,11 @@ public final class ClientEngine {
         }
     }
 
+    /**
+     * Menutup soket dengan aman, mengabaikan IOException.
+     *
+     * @param s soket yang akan ditutup
+     */
     private static void closeQuietly(Socket s) {
         try {
             s.close();
@@ -500,6 +560,12 @@ public final class ClientEngine {
         }
     }
 
+    /**
+     * Memetakan ConnectException menjadi ClientError dengan pesan yang mudah dipahami.
+     *
+     * @param e exception koneksi yang terjadi
+     * @return ClientError dengan pesan dan flag retryable
+     */
     private ClientError mapConnectError(ConnectException e) {
         String host = cfg.getHost();
         int port = cfg.getPort();
@@ -519,7 +585,12 @@ public final class ClientEngine {
         return new ClientError("Tidak dapat menyambung ke " + host + ":" + port + ": " + e.getMessage() + ".", true);
     }
 
-    /** Menjelaskan penolakan login berdasarkan KODE respons server, bukan menebak. */
+    /**
+     * Menjelaskan penolakan login berdasarkan KODE respons server, bukan menebak.
+     *
+     * @param resp respons login dari server
+     * @return ClientError dengan pesan yang sesuai
+     */
     private ClientError explainLoginFailure(String resp) {
         if (!resp.matches("^\\d{3}( .*)?$")) {
             return new ClientError("Terhubung, tetapi respons bukan dari server NetMonitor (diterima: '"
@@ -552,7 +623,12 @@ public final class ClientEngine {
         }
     }
 
-    /** Mengubah exception jaringan menjadi kalimat penyebab yang mudah dibaca. */
+    /**
+     * Mengubah exception jaringan menjadi kalimat penyebab yang mudah dibaca.
+     *
+     * @param e exception jaringan
+     * @return deskripsi penyebab kegagalan
+     */
     static String describeIo(IOException e) {
         String m = String.valueOf(e.getMessage()).toLowerCase();
         if (e instanceof SocketTimeoutException) {
@@ -600,6 +676,12 @@ public final class ClientEngine {
         private Consumer<String> onRequest;
         private Consumer<String> onLost;
 
+        /**
+         * Membungkus soket yang sudah tersambung menjadi objek Connection.
+         *
+         * @param socket soket klien yang sudah terhubung
+         * @throws IOException bila stream soket tidak dapat dibuka
+         */
         Connection(Socket socket) throws IOException {
             this.socket = socket;
             this.reader = new Protocol.LineReader(
@@ -607,6 +689,12 @@ public final class ClientEngine {
             this.writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8));
         }
 
+        /**
+         * Mengirim satu baris ke server secara sinkron.
+         *
+         * @param line baris yang akan dikirim
+         * @throws IOException bila terjadi kesalahan I/O
+         */
         synchronized void send(String line) throws IOException {
             Protocol.writeLine(writer, line);
         }
@@ -635,6 +723,12 @@ public final class ClientEngine {
             }
         }
 
+        /**
+         * Memulai thread pembaca baris dari server di latar belakang.
+         *
+         * @param onRequest callback untuk permintaan server (REQ) — khusus Agent
+         * @param onLost    callback saat koneksi terputus
+         */
         void startReader(Consumer<String> onRequest, Consumer<String> onLost) {
             this.onRequest = onRequest;
             this.onLost = onLost;
@@ -643,6 +737,10 @@ public final class ClientEngine {
             t.start();
         }
 
+        /**
+         * Loop utama pembaca: membalas heartbeat, meneruskan permintaan server, mengantre jawaban perintah,
+         * dan memantau apakah server masih terdengar.
+         */
         private void readLoop() {
             while (!lost) {
                 String line;
@@ -702,6 +800,11 @@ public final class ClientEngine {
             }
         }
 
+        /**
+         * Menandai koneksi sebagai putus sekali.
+         *
+         * @param reason alasan penyebab koneksi putus
+         */
         void markLost(String reason) {
             if (!marked.compareAndSet(false, true)) {
                 return;
@@ -717,6 +820,9 @@ public final class ClientEngine {
             lostLatch.countDown();
         }
 
+        /**
+         * Menutup koneksi dengan rapi (shutdownOutput lalu close soket).
+         */
         void close() {
             try {
                 socket.shutdownOutput();   // tutup sisi kirim dengan rapi sebelum soket ditutup
@@ -937,8 +1043,13 @@ public final class ClientEngine {
 
     // ------------------------------------------------------------------ mode AGENT
 
-    /** Menjawab permintaan server: "REQ <id> SYSINFO" dibalas "RES <id> <data>",
-     *  "REQ <id> EXEC <perintah>" dibalas "RES <id> <hasil>" (khusus Agent). */
+    /**
+     * Menjawab permintaan server: "REQ &lt;id&gt; SYSINFO" dibalas "RES &lt;id&gt; &lt;data&gt;",
+     * "REQ &lt;id&gt; EXEC &lt;perintah&gt;" dibalas "RES &lt;id&gt; &lt;hasil&gt;" (khusus Agent).
+     *
+     * @param c    koneksi ke server
+     * @param line baris permintaan dari server
+     */
     private void answerRequest(Connection c, String line) {
         String[] p = line.split("\\s+");
         String id = p.length > 1 ? p[1] : "0";
@@ -1032,6 +1143,11 @@ public final class ClientEngine {
         return Protocol.clean(sb.toString(), 4_096);
     }
 
+    /**
+     * Mengumpulkan informasi sistem Agent dalam satu baris: os, cores, ram, uptime.
+     *
+     * @return ringkasan informasi sistem
+     */
     @SuppressWarnings("deprecation")
     private static String collectSysinfo() {
         String os = System.getProperty("os.name", "unknown").replace(' ', '_');

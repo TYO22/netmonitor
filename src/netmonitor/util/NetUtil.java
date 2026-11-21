@@ -23,6 +23,7 @@ import java.util.regex.Pattern;
  */
 public final class NetUtil {
 
+    /** Konstruktor privat; kelas ini hanya berisi method utilitas statis. */
     private NetUtil() { }
 
     private static final Pattern IPV4 = Pattern.compile("^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$");
@@ -42,10 +43,14 @@ public final class NetUtil {
     private static volatile long netCheckedAt;
     private static volatile boolean netAvailable;
 
-    /** Resolusi DNS melewati batas waktu (DNS macet, jaringan putus, atau server DNS tidak menjawab). */
+    /** Exception yang dilempar ketika resolusi DNS melewati batas waktu. */
     public static class DnsTimeoutException extends IOException {
         private static final long serialVersionUID = 1L;
 
+        /**
+         * @param host      nama host yang dicoba diresolusi
+         * @param timeoutMs batas waktu resolusi dalam milidetik
+         */
         public DnsTimeoutException(String host, int timeoutMs) {
             super("DNS tidak menjawab dalam " + (timeoutMs / 1000) + " detik untuk " + host);
         }
@@ -53,10 +58,18 @@ public final class NetUtil {
 
     /** Hasil uji jangkauan host. */
     public static final class PingResult {
+        /** Alamat IP yang diuji. */
         public final InetAddress address;
+        /** True bila host menjawab (reachable). */
         public final boolean reachable;
+        /** Waktu tempuh ping dalam milidetik. */
         public final long millis;
 
+        /**
+         * @param address   alamat yang diuji
+         * @param reachable true bila host menjawab
+         * @param millis    waktu tempuh ping (ms)
+         */
         PingResult(InetAddress address, boolean reachable, long millis) {
             this.address = address;
             this.reachable = reachable;
@@ -67,6 +80,9 @@ public final class NetUtil {
     /**
      * Memeriksa FORMAT host saja (tanpa DNS): IPv4, literal IPv6, atau nama host RFC 1123.
      * Dicek lebih dulu agar input aneh tidak sampai ke resolver DNS.
+     *
+     * @param host nama host atau alamat IP yang akan diperiksa
+     * @return {@code true} bila format host valid
      */
     public static boolean isValidFormat(String host) {
         if (host == null || host.isEmpty() || host.length() > 253) {
@@ -94,12 +110,27 @@ public final class NetUtil {
         return !labels[labels.length - 1].matches("\\d+");
     }
 
-    /** Resolusi IP/domain menjadi InetAddress (tanpa batas waktu dari aplikasi). */
+    /**
+     * Resolusi IP/domain menjadi InetAddress (tanpa batas waktu dari aplikasi).
+     *
+     * @param host nama host atau alamat IP yang akan diresolusi
+     * @return InetAddress hasil resolusi
+     * @throws UnknownHostException bila host tidak dikenal
+     */
     public static InetAddress resolve(String host) throws UnknownHostException {
         return InetAddress.getByName(host);
     }
 
-    /** Menjalankan tugas di pekerja latar belakang dengan batas waktu. Tugas yang macet tidak menahan pemanggil. */
+    /**
+     * Menjalankan tugas di pekerja latar belakang dengan batas waktu. Tugas yang macet tidak menahan pemanggil.
+     *
+     * @param <T>       tipe hasil tugas
+     * @param task      tugas yang akan dijalankan (Callable)
+     * @param timeoutMs batas waktu tunggu (ms)
+     * @return hasil tugas
+     * @throws TimeoutException bila tugas melebihi batas waktu
+     * @throws Exception        bila tugas gagal dengan exception lain
+     */
     public static <T> T callWithTimeout(Callable<T> task, long timeoutMs) throws Exception {
         Future<T> future;
         try {
@@ -124,6 +155,9 @@ public final class NetUtil {
     /**
      * Resolusi DNS dengan batas waktu.
      *
+     * @param host      nama host yang akan diresolusi
+     * @param timeoutMs batas waktu resolusi (ms)
+     * @return InetAddress hasil resolusi
      * @throws UnknownHostException nama tidak dikenal (atau DNS menjawab "tidak ada")
      * @throws DnsTimeoutException  DNS tidak menjawab tepat waktu
      */
@@ -142,7 +176,15 @@ public final class NetUtil {
         }
     }
 
-    /** Menguji jangkauan host dengan InetAddress.isReachable(); resolusi DNS dibatasi dnsTimeoutMs. */
+    /**
+     * Menguji jangkauan host dengan InetAddress.isReachable(); resolusi DNS dibatasi dnsTimeoutMs.
+     *
+     * @param host          nama host atau alamat IP yang akan diuji
+     * @param pingTimeoutMs batas waktu ping (ms)
+     * @param dnsTimeoutMs  batas waktu resolusi DNS (ms)
+     * @return hasil uji jangkauan (address, reachable, millis)
+     * @throws IOException bila terjadi error I/O atau DNS gagal
+     */
     public static PingResult ping(String host, int pingTimeoutMs, int dnsTimeoutMs) throws IOException {
         InetAddress address = resolveWithTimeout(host, dnsTimeoutMs);
         long start = System.nanoTime();
@@ -151,11 +193,24 @@ public final class NetUtil {
         return new PingResult(address, reachable, millis);
     }
 
+    /**
+     * Menguji jangkauan host dengan timeout bawaan (DNS 4 detik).
+     *
+     * @param host      nama host atau alamat IP yang akan diuji
+     * @param timeoutMs batas waktu ping (ms)
+     * @return hasil uji jangkauan (address, reachable, millis)
+     * @throws IOException bila terjadi error I/O atau DNS gagal
+     */
     public static PingResult ping(String host, int timeoutMs) throws IOException {
         return ping(host, timeoutMs, 4_000);
     }
 
-    /** True untuk alamat loopback / jaringan privat yang tidak dikenal oleh layanan GeoIP publik. */
+    /**
+     * True untuk alamat loopback / jaringan privat yang tidak dikenal oleh layanan GeoIP publik.
+     *
+     * @param a alamat InetAddress yang akan diperiksa
+     * @return {@code true} bila alamat termasuk lokal/privat
+     */
     public static boolean isLocal(InetAddress a) {
         return a.isLoopbackAddress() || a.isSiteLocalAddress()
                 || a.isLinkLocalAddress() || a.isAnyLocalAddress();
@@ -164,7 +219,9 @@ public final class NetUtil {
     /**
      * Diagnosis sederhana: apakah komputer ini punya akses internet? Mencoba membuka koneksi TCP ke
      * beberapa alamat IP publik (tanpa DNS). Hasilnya disimpan 5 detik agar tidak membebani jaringan.
-     * Daftar target dapat diganti dengan properti -Dnetmonitor.internet.check=host:port,host:port
+     * Daftar target dapat diganti dengan properti -Dnetmonitor.internet.check=host:port,host:port.
+     *
+     * @return {@code true} bila internet tersedia
      */
     public static boolean isInternetAvailable() {
         long now = System.currentTimeMillis();
