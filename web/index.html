@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NetMonitor</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app">
+    <section id="view-login" class="view">
+      <div class="login-panel">
+        <h1 class="wordmark">NetMonitor</h1>
+        <p class="subtitle">Infrastructure Telemetry &amp; Control</p>
+        <form id="login-form" class="form">
+          <div class="row two">
+            <label class="field">
+              <span>Server Host</span>
+              <input id="host" type="text" value="localhost" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Port</span>
+              <input id="port" type="number" value="9090" min="1" max="65535">
+            </label>
+          </div>
+          <label class="field">
+            <span>Role</span>
+            <select id="role">
+              <option value="INSPECTOR">INSPECTOR</option>
+              <option value="AGENT">AGENT</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Username</span>
+            <input id="username" type="text" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="password" type="password" autocomplete="off">
+          </label>
+          <button class="btn primary full" type="submit">Connect</button>
+          <div id="login-error" class="alert hidden"></div>
+        </form>
+      </div>
+    </section>
+
+    <section id="view-inspector" class="view hidden">
+      <header class="topbar">
+        <div class="topbar-left">
+          <span class="wordmark">NetMonitor</span>
+          <span class="session-tag" id="session-tag">INSPECTOR</span>
+        </div>
+        <div class="topbar-right">
+          <label class="udp-field">
+            <span>UDP Port</span>
+            <input id="udp-port" type="number" value="9095" min="1" max="65535">
+          </label>
+          <button id="telemetry-btn" class="btn bordered">SUBSCRIBE</button>
+          <button id="refresh-btn" class="btn bordered">Refresh</button>
+          <button id="disconnect-btn" class="btn bordered">Disconnect</button>
+        </div>
+      </header>
+
+      <main class="container">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Systems</h2>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>System</th>
+                  <th>Status</th>
+                  <th>Location</th>
+                  <th>CPU</th>
+                  <th>Memory</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="nodes-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Selected Node Telemetry</h2>
+          </div>
+          <div class="sparklines">
+            <div class="sparkline-box">
+              <div class="sparkline-head">
+                <span>CPU History (40s)</span>
+                <span id="cpu-readout" class="readout tabular">0.0%</span>
+              </div>
+              <svg id="cpu-spark" class="sparkline" viewBox="0 0 200 40" preserveAspectRatio="none" aria-hidden="true">
+                <polyline points="" fill="none" stroke="var(--telemetry-green)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></polyline>
+              </svg>
+            </div>
+            <div class="sparkline-box">
+              <div class="sparkline-head">
+                <span>Memory History (40s)</span>
+                <span id="mem-readout" class="readout tabular">0.0%</span>
+              </div>
+              <svg id="mem-spark" class="sparkline" viewBox="0 0 200 40" preserveAspectRatio="none" aria-hidden="true">
+                <polyline points="" fill="none" stroke="var(--telemetry-green)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></polyline>
+              </svg>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel log-panel">
+          <div class="panel-header">
+            <h2>Protocol Activity</h2>
+          </div>
+          <div id="log-feed" class="log-feed"></div>
+        </section>
+      </main>
+    </section>
+
+    <section id="view-agent" class="view hidden">
+      <header class="topbar">
+        <div class="topbar-left">
+          <span class="wordmark">NetMonitor Agent</span>
+          <span class="session-tag" id="agent-session-tag">AGENT</span>
+        </div>
+        <div class="topbar-right">
+          <button id="agent-disconnect-btn" class="btn bordered">Disconnect</button>
+        </div>
+      </header>
+      <main class="container">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Received Files</h2>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Filename</th>
+                  <th>Bytes</th>
+                  <th>Timestamp</th>
+                  <th>Local Path</th>
+                </tr>
+              </thead>
+              <tbody id="agent-files-body"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Operator Messages</h2>
+          </div>
+          <div id="agent-msg-feed" class="log-feed"></div>
+        </section>
+      </main>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
