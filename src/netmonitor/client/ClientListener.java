@@ -1,4 +1,4 @@
-package netmonitor;
+package netmonitor.client;
 
 /**
  * Antarmuka "kejadian" antara mesin jaringan klien dan lapisan tampilan.

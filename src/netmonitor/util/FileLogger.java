@@ -1,4 +1,4 @@
-package netmonitor;
+package netmonitor.util;
 
 import java.io.BufferedWriter;
 import java.io.FileOutputStream;

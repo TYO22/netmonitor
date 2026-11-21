@@ -1,4 +1,6 @@
-package netmonitor;
+package netmonitor.client;
+
+import netmonitor.common.Protocol;
 
 /**
  * Pengaturan koneksi klien (tanpa logika). Dipakai bersama oleh mesin jaringan {@link ClientEngine}

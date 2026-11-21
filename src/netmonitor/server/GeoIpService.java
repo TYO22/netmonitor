@@ -1,5 +1,7 @@
-package netmonitor;
+package netmonitor.server;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.ConnectException;
@@ -13,8 +15,10 @@ import java.net.URL;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeoutException;
-import com.google.gson.Gson;
-import com.google.gson.JsonParseException;
+import netmonitor.common.Protocol;
+import netmonitor.dto.GeoLocationDTO;
+import netmonitor.util.FileLogger;
+import netmonitor.util.NetUtil;
 
 /**
  * Integrasi Web API publik GeoIP lewat HttpURLConnection (Pertemuan 4).
@@ -145,7 +149,18 @@ public final class GeoIpService {
 
             int status = conn.getResponseCode();
             if (status != HttpURLConnection.HTTP_OK) {
-                return Outcome.fail(describeHttp(status));
+                // Baca respons kesalahan dari getErrorStream() untuk detail lebih lanjut
+                String errorBody = null;
+                try (InputStream errIn = conn.getErrorStream()) {
+                    if (errIn != null) {
+                        errorBody = new String(errIn.readNBytes(MAX_BODY_BYTES), StandardCharsets.UTF_8);
+                    }
+                } catch (IOException ignored) {
+                }
+                String detail = errorBody != null && errorBody.length() > 0
+                        ? (" respons: " + errorBody.substring(0, Math.min(errorBody.length(), 200)))
+                        : "";
+                return Outcome.fail(describeHttp(status) + detail);
             }
             String body;
             try (InputStream in = conn.getInputStream()) {

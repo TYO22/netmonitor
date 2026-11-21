@@ -1,4 +1,4 @@
-package netmonitor;
+package netmonitor.dto;
 
 import com.google.gson.annotations.SerializedName;
 

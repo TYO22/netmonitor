@@ -1,8 +1,8 @@
-package netmonitor;
+package netmonitor.client;
 
-import java.io.BufferedReader;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -32,6 +32,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import netmonitor.common.Protocol;
+import netmonitor.server.TelemetryService;
+import netmonitor.util.NetUtil;
 
 /**
  * MESIN JARINGAN klien NetMonitor (Pertemuan 5): koneksi TCP, login, thread penerima di latar belakang,

@@ -1,4 +1,4 @@
-package netmonitor;
+package netmonitor.client;
 
 /**
  * Titik masuk klien NetMonitor (Pertemuan 5). Sengaja tipis: pengaturan dibaca oleh tampilan konsol,

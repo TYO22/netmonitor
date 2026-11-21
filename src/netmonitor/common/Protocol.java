@@ -1,4 +1,4 @@
-package netmonitor;
+package netmonitor.common;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;

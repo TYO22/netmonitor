@@ -1,6 +1,7 @@
-package netmonitor;
+package netmonitor.client;
 
 import java.util.Scanner;
+import netmonitor.common.Protocol;
 
 /**
  * TAMPILAN KONSOL (CLI) klien NetMonitor. Seluruh pembacaan keyboard dan pencetakan ke layar ada di sini;
