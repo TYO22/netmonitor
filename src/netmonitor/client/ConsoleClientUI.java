@@ -13,6 +13,24 @@ public final class ConsoleClientUI implements ClientListener {
 
     private final boolean agent;
     private ClientEngine engine;
+    private static final boolean ANSI = !"false".equalsIgnoreCase(System.getProperty("netmonitor.cli.ansi", "true"));
+    private static final String ANSI_RESET = "\u001B[0m";
+    private static final String ANSI_BOLD = "\u001B[1m";
+    private static final String ANSI_CYAN = "\u001B[36m";
+    private static final String ANSI_GREEN = "\u001B[32m";
+    private static final String ANSI_RED = "\u001B[31m";
+
+    /**
+     * Mengembalikan teks dengan kode pewarnaan ANSI bila aktif, atau teks asli bila dinonaktifkan
+     * melalui properti -Dnetmonitor.cli.ansi=false.
+     *
+     * @param s  teks yang akan diberi warna
+     * @param code kode warna ANSI (mis. "\u001B[32m" untuk hijau)
+     * @return teks dengan pemutih/warna, atau teks polos bila ANSI dimatikan
+     */
+    private static String ansiOn(String s, String code) {
+        return ANSI ? code + s + ANSI_RESET : s;
+    }
 
     /**
      * Membuat tampilan konsol.
@@ -155,13 +173,29 @@ public final class ConsoleClientUI implements ClientListener {
      * @return kode keluar dari mesin Agent
      */
     private int runAgent() {
-        // Thread kecil membaca ketikan 'quit'/'exit' selama Agent hidup (termasuk saat sambung ulang).
+        // Thread kecil membaca ketikan pengguna selama Agent hidup (termasuk saat sambung ulang).
+        // Agent diizinkan mengirim MSG dan QUIT; perintah administratif akan ditolak server (403).
         Thread console = new Thread(() -> {
             while (STDIN.hasNextLine()) {
                 String in = STDIN.nextLine().trim();
+                if (in.isEmpty()) {
+                    continue;
+                }
                 if (in.equalsIgnoreCase("quit") || in.equalsIgnoreCase("exit")) {
                     engine.requestQuit();
                     return;
+                }
+                try {
+                    ClientEngine.Result r = engine.request(in);
+                    if (r.line != null) {
+                        System.out.println(r.line);
+                        if (r.quitting) {
+                            engine.close();
+                            return;
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println("Gagal mengirim perintah: " + e.getMessage());
                 }
             }
         }, "agent-stdin");
@@ -180,6 +214,25 @@ public final class ConsoleClientUI implements ClientListener {
             return 1;
         }
         System.out.println("Perintah: LIST | SYSINFO <agentId> | PING <host> | RESOLVE <domain> | BROADCAST <teks> | MSG <username> <teks> | EXEC <agentId> <namaPerintah> | UPLOAD <pathLokal> | PUSH <agentId> <namaBerkas> | SUBSCRIBE <udpPort> | UNSUBSCRIBE | WATCH | QUIT");
+        // Pemisah visual dan ringkasan opsi menu bernomor saat klien siap menerima perintah.
+        System.out.println(ansiOn("=========================================", ANSI_CYAN));
+        System.out.println(ansiOn("NetMonitor Inspector - SIAP", ANSI_BOLD + ANSI_CYAN));
+        System.out.println(ansiOn("=========================================", ANSI_CYAN));
+        System.out.println("  # 1 LIST");
+        System.out.println("  # 2 SYSINFO <agentId>");
+        System.out.println("  # 3 PING <host>");
+        System.out.println("  # 4 RESOLVE <domain>");
+        System.out.println("  # 5 BROADCAST <teks>");
+        System.out.println("  # 6 MSG <username> <teks>");
+        System.out.println("  # 7 EXEC <agentId> <namaPerintah>");
+        System.out.println("  # 8 UPLOAD <pathLokal>");
+        System.out.println("  # 9 PUSH <agentId> <namaBerkas>");
+        System.out.println("  # 10 SUBSCRIBE <udpPort>");
+        System.out.println("  # 11 UNSUBSCRIBE");
+        System.out.println("  # 12 WATCH");
+        System.out.println("  # 13 QUIT / EXIT");
+        System.out.println("  # 14 HELP");
+        System.out.println(ansiOn("=========================================", ANSI_CYAN));
         while (true) {
             System.out.print("netmonitor> ");
             String cmd = STDIN.hasNextLine() ? STDIN.nextLine().trim() : "QUIT";
@@ -268,13 +321,13 @@ public final class ConsoleClientUI implements ClientListener {
     /** @param message informasi biasa yang akan dicetak ke konsol. */
     @Override
     public void onInfo(String message) {
-        System.out.println(message);
+        System.out.println(ansiOn(message, ANSI_CYAN));
     }
 
     /** @param message galat atau peringatan yang akan dicetak ke stderr. */
     @Override
     public void onError(String message) {
-        System.err.println(message);
+        System.err.println(ansiOn(message, ANSI_RED));
     }
 
     /**
@@ -290,7 +343,8 @@ public final class ConsoleClientUI implements ClientListener {
             System.out.println("Tersambung kembali ke server.");
         }
         if (agent) {
-            System.out.println("Agent aktif. Ketik 'quit' atau 'exit' lalu Enter untuk keluar.");
+            System.out.println(ansiOn("Agent aktif. Ketik 'quit' atau 'exit' lalu Enter untuk keluar.", ANSI_GREEN));
+            System.out.println(ansiOn("Perintah Agent: MSG <username> <teks> | QUIT", ANSI_CYAN));
         }
     }
 
@@ -350,12 +404,12 @@ public final class ConsoleClientUI implements ClientListener {
     @Override
     public void onConnectionLost(String reason, boolean willReconnect, boolean byServer) {
         if (willReconnect) {
-            System.out.println("[KONEKSI TERPUTUS] Agent kehilangan koneksi ke server: " + reason + ".");
+            System.out.println(ansiOn("[KONEKSI TERPUTUS] Agent kehilangan koneksi ke server: " + reason + ".", ANSI_RED));
             return;
         }
         // Inspector: tidak menyambung ulang; tampilkan penyebab lalu hentikan program.
         System.out.println();
-        System.out.println("[KONEKSI TERPUTUS] Koneksi ke server terputus: " + reason + ".");
+        System.out.println(ansiOn("[KONEKSI TERPUTUS] Koneksi ke server terputus: " + reason + ".", ANSI_RED));
         System.out.println(byServer
                 ? "Jalankan ulang Inspector untuk login kembali."
                 : "Jalankan ulang Inspector setelah server dan jaringan pulih.");

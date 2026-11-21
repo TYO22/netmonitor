@@ -487,8 +487,7 @@ public class ClientHandler implements Runnable {
      * @throws IOException bila terjadi kesalahan I/O saat menulis respons
      */
     private void doList() throws IOException {
-        if (username == null) {
-            send(Protocol.err(401, "Belum Login"));
+        if (!requireInspector()) {
             return;
         }
         List<String> users = server.getSessions().values().stream()
@@ -715,8 +714,7 @@ public class ClientHandler implements Runnable {
      * @throws IOException jika gagal menulis respons ke pengirim
      */
     private void doBroadcast(String[] p) throws IOException {
-        if (username == null) {
-            send(Protocol.err(401, "Belum Login"));
+        if (!requireInspector()) {
             return;
         }
         String text = joinFrom(p, 1);
@@ -737,6 +735,7 @@ public class ClientHandler implements Runnable {
 
     /**
      * Menangani perintah MSG: kirim pesan privat ke satu klien.
+     * Diizinkan untuk peran AGENT maupun INSPECTOR (tidak memerlukan requireInspector).
      * Jika target tidak terhubung, balas 404 ERR Pengguna Tidak Terhubung.
      *
      * @param p token perintah, p[1] target username, p[2..] isi pesan

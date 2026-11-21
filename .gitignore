@@ -1,5 +1,6 @@
 # Hasil kompilasi & log runtime
 out/
+.vscode/
 *.class
 *.log
 
@@ -7,3 +8,8 @@ out/
 AGENTS.md
 docs/
 tests/
+
+# Folder runtime transfer berkas & berkas dummy pengujian
+uploads/
+downloads/
+*.bin
