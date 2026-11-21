@@ -8,7 +8,10 @@ const state = {
   port: 0,
   subscribed: false,
   udpPort: 9095,
-  nodes: []
+  nodes: [],
+  stagedFiles: [],
+  receivedFiles: [],
+  receivedFilesDetail: []
 };
 
 const history = new Map();
@@ -84,6 +87,8 @@ async function loadState() {
   state.udpPort = d.udpPort || state.udpPort;
   state.nodes = Array.isArray(d.nodes) ? d.nodes : [];
   state.stagedFiles = Array.isArray(d.stagedFiles) ? d.stagedFiles : [];
+  state.receivedFiles = Array.isArray(d.receivedFiles) ? d.receivedFiles : [];
+  state.receivedFilesDetail = Array.isArray(d.receivedFilesDetail) ? d.receivedFilesDetail : [];
   if (state.connected) {
     if (state.role === 'INSPECTOR') {
       showView('inspector');
@@ -92,10 +97,12 @@ async function loadState() {
       renderNodes();
       updateStagedFilesUI();
       updatePushFileSelect();
+      updateChatTarget();
       if (state.nodes.length === 0) loadNodes();
     } else if (state.role === 'AGENT') {
       showView('agent');
       updateAgentTag();
+      renderAgentFiles();
     }
     connectStream();
   } else {
@@ -143,6 +150,34 @@ async function loadNodes() {
     state.nodes = res.data.nodes;
   }
   renderNodes();
+}
+
+function renderAgentFiles() {
+  const body = $('agent-files-body');
+  if (!body) return;
+  body.innerHTML = '';
+  const files = Array.isArray(state.receivedFilesDetail) ? state.receivedFilesDetail : [];
+  if (files.length === 0) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4;
+    td.textContent = 'Belum ada berkas yang diterima.';
+    td.className = 'mono';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  files.slice().reverse().forEach((f) => {
+    const tr = document.createElement('tr');
+    const cells = [
+      createCell('td', f.filename || '-', 'mono tabular'),
+      createCell('td', typeof f.bytes === 'number' ? f.bytes.toLocaleString() : '-', 'mono tabular'),
+      createCell('td', f.timestamp ? formatTime(f.timestamp) : '-', 'mono tabular'),
+      createCell('td', f.localPath || ('downloads/' + (state.username || '') + '/' + (f.filename || '-')), 'mono tabular')
+    ];
+    cells.forEach((c) => tr.appendChild(c));
+    body.appendChild(tr);
+  });
 }
 
 function statusClass(status) {
@@ -325,8 +360,10 @@ function showWorkspaceTab(tab) {
   });
   const diag = $('ws-diag');
   const files = $('ws-files');
+  const comms = $('ws-comms');
   if (diag) diag.classList.toggle('hidden', tab !== 'diag');
   if (files) files.classList.toggle('hidden', tab !== 'files');
+  if (comms) comms.classList.toggle('hidden', tab !== 'comms');
   if (tab === 'files') {
     updateStagedFilesUI();
     updatePushAgentSelect();
@@ -559,6 +596,96 @@ function appendLog(d) {
   feed.scrollTop = feed.scrollHeight;
 }
 
+function appendAgentMessage(d) {
+  const feed = $('agent-msg-feed');
+  if (!feed) return;
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  const ts = document.createElement('span');
+  ts.className = 'log-ts tabular';
+  ts.textContent = formatTime(d && d.timestamp);
+  const sender = document.createElement('span');
+  sender.className = 'log-level info';
+  sender.textContent = (d && (d.sender || d.type || 'MSG')).toUpperCase();
+  const text = document.createElement('span');
+  text.className = 'log-text';
+  text.textContent = (d && (d.content || d.raw || '')) || '';
+  line.appendChild(ts);
+  line.appendChild(sender);
+  line.appendChild(text);
+  feed.appendChild(line);
+  while (feed.children.length > maxLogLines) {
+    feed.removeChild(feed.firstChild);
+  }
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function appendChatFeed(id, d) {
+  const feed = $(id);
+  if (!feed) return;
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  const ts = document.createElement('span');
+  ts.className = 'log-ts tabular';
+  ts.textContent = formatTime(d && d.timestamp);
+  const sender = document.createElement('span');
+  sender.className = 'log-level info';
+  sender.textContent = (d && (d.sender || 'MSG')).toUpperCase();
+  const text = document.createElement('span');
+  text.className = 'log-text';
+  text.textContent = (d && (d.content || d.raw || '')) || '';
+  line.appendChild(ts);
+  line.appendChild(sender);
+  line.appendChild(text);
+  feed.appendChild(line);
+  while (feed.children.length > maxLogLines) {
+    feed.removeChild(feed.firstChild);
+  }
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function updateChatTarget() {
+  const sel = $('chat-target');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '<option value="ALL">ALL (Broadcast)</option>';
+  state.nodes.forEach((node) => {
+    const o = document.createElement('option');
+    o.value = node.agentId || '';
+    o.textContent = (node.agentId || '') + ' (' + (node.role || '') + ')';
+    sel.appendChild(o);
+  });
+  if (current && [...sel.options].some((o) => o.value === current)) {
+    sel.value = current;
+  }
+}
+
+async function sendAgentReply() {
+  const recipient = $('agent-reply-recipient') ? $('agent-reply-recipient').value.trim() : 'admin';
+  const message = $('agent-reply-message') ? $('agent-reply-message').value.trim() : '';
+  if (!message) return;
+  const target = recipient || 'admin';
+  const res = await api('/api/chat/send', { method: 'POST', body: { target: target, message: message } });
+  if (res.ok) {
+    if ($('agent-reply-message')) $('agent-reply-message').value = '';
+    appendAgentMessage({ type: 'message', sender: state.username || 'AGENT', content: message, timestamp: new Date().toISOString() });
+  } else {
+    appendLog({ level: 'ERROR', line: (res.data && res.data.message) || 'Gagal mengirim pesan', timestamp: new Date().toISOString() });
+  }
+}
+
+async function sendChat() {
+  const target = $('chat-target') ? $('chat-target').value : 'ALL';
+  const message = $('chat-message') ? $('chat-message').value.trim() : '';
+  if (!message) return;
+  const res = await api('/api/chat/send', { method: 'POST', body: { target: target, message: message } });
+  if (res.ok) {
+    if ($('chat-message')) $('chat-message').value = '';
+  } else {
+    appendLog({ level: 'ERROR', line: (res.data && res.data.message) || 'Gagal mengirim pesan', timestamp: new Date().toISOString() });
+  }
+}
+
 function connectStream() {
   if (eventSource) {
     eventSource.close();
@@ -580,6 +707,11 @@ function connectStream() {
   eventSource.addEventListener('message', (e) => {
     let d = null;
     try { d = JSON.parse(e.data); } catch (err) { return; }
+    if (state.role === 'AGENT') {
+      appendAgentMessage(d);
+    } else {
+      appendChatFeed('chat-feed', d);
+    }
     appendLog({ level: 'INFO', line: (d.raw || d.content || ''), timestamp: d.timestamp });
   });
   eventSource.addEventListener('transfer', (e) => {
@@ -592,6 +724,19 @@ function connectStream() {
       prog.style.width = Math.min(100, (d.bytesTransferred / d.totalBytes) * 100) + '%';
     }
     if (d.direction === 'PUSH') appendPushStatus(msg);
+    if (state.role === 'AGENT' && d.direction === 'PUSH' && d.status === 'complete' && d.filename) {
+      if (!state.receivedFiles.includes(d.filename)) {
+        state.receivedFiles.push(d.filename);
+      }
+      const detail = {
+        filename: d.filename,
+        bytes: d.bytesTransferred || d.totalBytes || 0,
+        timestamp: d.timestamp || new Date().toISOString(),
+        localPath: 'downloads/' + (state.username || '') + '/' + d.filename
+      };
+      state.receivedFilesDetail.push(detail);
+      renderAgentFiles();
+    }
   });
   eventSource.addEventListener('disconnect', (e) => {
     let d = null;
@@ -629,6 +774,8 @@ async function handleLoginSubmit(ev) {
   state.subscribed = false;
   state.nodes = [];
   state.stagedFiles = [];
+  state.receivedFiles = [];
+  state.receivedFilesDetail = [];
   if (state.role === 'INSPECTOR') {
     showView('inspector');
     updateSessionTag();
@@ -637,6 +784,7 @@ async function handleLoginSubmit(ev) {
   } else {
     showView('agent');
     updateAgentTag();
+    renderAgentFiles();
   }
   connectStream();
 }
@@ -672,6 +820,8 @@ async function disconnect() {
   state.connected = false;
   state.nodes = [];
   state.stagedFiles = [];
+  state.receivedFiles = [];
+  state.receivedFilesDetail = [];
   state.subscribed = false;
   selectedAgent = null;
   history.clear();
@@ -703,5 +853,9 @@ document.addEventListener('DOMContentLoaded', () => {
   if (fu) fu.addEventListener('click', handleFileUpload);
   const fp = $('push-btn');
   if (fp) fp.addEventListener('click', handleFilePush);
+  const cs = $('chat-send');
+  if (cs) cs.addEventListener('click', sendChat);
+  const ars = $('agent-reply-send');
+  if (ars) ars.addEventListener('click', sendAgentReply);
   loadState();
 });

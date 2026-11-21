@@ -1,7 +1,7 @@
 # NetMonitor Enterprise — Kelompok 2, Pemrograman Jaringan (TIS31263)
 
 Aplikasi client-server TCP berbasis Java untuk memantau node (Agent) dari satu konsol (Inspector).
-Status: **tahap komunikasi, remote command, dan telemetri UDP selesai** (lihat `docs/PRD_NetMonitor_Final.md` untuk rencana, keputusan desain, dan to-do).
+Status: **CLI lengkap; Web GUI (INSPECTOR + AGENT) selesai** (lihat `docs/PRD_NetMonitor_Final.md` untuk rencana, keputusan desain, dan to-do).
 
 ## Struktur
 
@@ -27,6 +27,7 @@ javac -Xlint:all -cp lib\gson-2.15.0.jar -d out src\netmonitor\dto\*.java
 javac -Xlint:all -cp lib\gson-2.15.0.jar -d out src\netmonitor\util\*.java
 javac -Xlint:all -cp lib\gson-2.15.0.jar -d out src\netmonitor\server\*.java
 javac -Xlint:all -cp lib\gson-2.15.0.jar -d out src\netmonitor\client\*.java
+javac -Xlint:all -d out -cp lib\gson-2.15.0.jar src\netmonitor\web\*.java
 ```
 
 Linux/macOS (per sub-package):
@@ -37,6 +38,7 @@ javac -Xlint:all -cp lib/gson-2.15.0.jar -d out src/netmonitor/dto/*.java
 javac -Xlint:all -cp lib/gson-2.15.0.jar -d out src/netmonitor/util/*.java
 javac -Xlint:all -cp lib/gson-2.15.0.jar -d out src/netmonitor/server/*.java
 javac -Xlint:all -cp lib/gson-2.15.0.jar -d out src/netmonitor/client/*.java
+javac -Xlint:all -d out -cp lib/gson-2.15.0.jar src/netmonitor/web/*.java
 ```
 
 ## Menjalankan (tiga terminal, dari folder utama proyek)
@@ -92,6 +94,26 @@ netmonitor> QUIT
 ```
 
 Agent: ketik `quit` atau `exit` lalu Enter untuk keluar. Akun bawaan: `admin/admin123` (INSPECTOR), `agent01..03/agent123` (AGENT). Di VS Code gunakan tombol **Run Java** (bukan Code Runner).
+
+## Web GUI (bonus)
+
+Kompilasi paket `web` (lihat atas), lalu jalankan server dan jembatan web di dua terminal terpisah:
+
+Windows:
+
+```powershell
+java -cp "out;lib\gson-2.15.0.jar" netmonitor.server.NetMonitorServer 9090
+java -cp "out;lib\gson-2.15.0.jar" netmonitor.web.NetMonitorWebClient 8080
+```
+
+Linux/macOS:
+
+```bash
+java -cp "out:lib/gson-2.15.0.jar" netmonitor.server.NetMonitorServer 9090
+java -cp "out:lib/gson-2.15.0.jar" netmonitor.web.NetMonitorWebClient 8080
+```
+
+Buka `http://localhost:8080` di browser. Login sebagai `INSPECTOR` atau `AGENT`. Untuk demo side-by-side, buka dua tab browser: satu login INSPECTOR dan satu login AGENT; Inspector dapat mengirim patch dan pesan, Agent menampilkan berkas yang diterima dan membalas pesan. JVM shutdown hook (`Ctrl+C`) menutup seluruh sesi dengan rapi.
 
 ## Fitur yang telah diimplementasikan
 

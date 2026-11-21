@@ -102,6 +102,7 @@ public class WebBridgeServer {
         server.createContext("/api/diagnostics/resolve", this::handleDiagnosticsResolve);
         server.createContext("/api/files/upload", this::handleFilesUpload);
         server.createContext("/api/files/push", this::handleFilesPush);
+        server.createContext("/api/chat/send", this::handleChatSend);
     }
 
     // ------------------------------------------------------------------ static files
@@ -250,7 +251,8 @@ public class WebBridgeServer {
                     "udpPort", 0,
                     "nodes", new ArrayList<>(),
                     "stagedFiles", new ArrayList<>(),
-                    "receivedFiles", new ArrayList<>()
+                    "receivedFiles", new ArrayList<>(),
+                    "receivedFilesDetail", new ArrayList<>()
             ));
             return;
         }
@@ -264,7 +266,8 @@ public class WebBridgeServer {
                 "udpPort", s.udpPort,
                 "nodes", nodesJson(s),
                 "stagedFiles", new ArrayList<>(s.stagedFiles),
-                "receivedFiles", new ArrayList<>(s.receivedFiles)
+                "receivedFiles", new ArrayList<>(s.receivedFiles),
+                "receivedFilesDetail", new ArrayList<>(s.receivedFilesDetail)
         ));
     }
 
@@ -333,7 +336,7 @@ public class WebBridgeServer {
                     // abaikan
                 }
                 try {
-                    session.agentThread.join(2000);
+                    session.agentThread.join(3000);
                 } catch (InterruptedException ignored) {
                     Thread.currentThread().interrupt();
                 }
@@ -397,13 +400,20 @@ public class WebBridgeServer {
             // abaikan
         }
         try {
+            if (!s.cfg.isAgent()) {
+                s.engine.unsubscribeTelemetry();
+            }
+        } catch (Exception ignored) {
+            // abaikan
+        }
+        try {
             s.engine.close();
         } catch (Exception ignored) {
             // abaikan
         }
         if (s.agentThread != null) {
             try {
-                s.agentThread.join(2000);
+                s.agentThread.join(3000);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -911,6 +921,67 @@ public class WebBridgeServer {
     }
 
     /**
+     * Endpoint chat: mengirim BROADCAST atau MSG (semua peran diizinkan).
+     * Body JSON: { target, message }.
+     *
+     * @param ex pertukaran HTTP
+     * @throws IOException bila terjadi kesalahan I/O
+     */
+    private void handleChatSend(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            sendJson(ex, 405, mapOf("ok", false, "message", "Method not allowed"));
+            return;
+        }
+        WebSession s = sessionFromRequest(ex);
+        if (s == null) {
+            sendJson(ex, 401, mapOf("ok", false, "message", "Sesi tidak ditemukan"));
+            return;
+        }
+        if (!s.connected) {
+            sendJson(ex, 409, mapOf("ok", false, "message", "Sesi tidak terhubung"));
+            return;
+        }
+        JsonObject body = readJsonObject(ex);
+        if (body == null) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "Body JSON tidak valid"));
+            return;
+        }
+        String target = str(body, "target", "ALL").trim();
+        String message = str(body, "message", "").trim();
+        if (message.isEmpty()) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "Pesan tidak boleh kosong"));
+            return;
+        }
+        if (message.contains("\n") || message.contains("\r")) {
+            sendJson(ex, 400, mapOf("ok", false, "message", "Pesan tidak boleh mengandung baris baru"));
+            return;
+        }
+        String command;
+        if ("ALL".equalsIgnoreCase(target)) {
+            command = "BROADCAST " + message;
+        } else {
+            if (target.isEmpty()) {
+                sendJson(ex, 400, mapOf("ok", false, "message", "Target tidak boleh kosong"));
+                return;
+            }
+            command = "MSG " + target + " " + message;
+        }
+        ClientEngine.Result r;
+        synchronized (s) {
+            r = s.engine.request(command);
+        }
+        boolean ok = r.status == ClientEngine.Result.Status.OK && r.line != null && r.line.startsWith("200");
+        broadcastSse(s, "log", mapOf("level", ok ? "INFO" : "ERROR",
+                "line", command + " -> " + (r.line == null ? String.valueOf(r.status) : r.line),
+                "timestamp", now()));
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("ok", ok);
+        out.put("line", r.line == null ? "" : r.line);
+        out.put("message", ok ? "Pesan terkirim" : (r.line == null ? String.valueOf(r.status) : r.line));
+        sendJson(ex, 200, out);
+    }
+
+    /**
      * Membaca seluruh isi body permintaan HTTP sebagai byte mentah (untuk unggah berkas).
      *
      * @param ex pertukaran HTTP
@@ -1072,7 +1143,33 @@ public class WebBridgeServer {
 
         @Override
         public void onChatMessage(String line) {
-            broadcast("message", mapStatic("type", "chat", "raw", line, "timestamp", now()));
+            String type = "chat";
+            String sender = "";
+            String content = line;
+            if (line != null && line.startsWith("BCAST ")) {
+                type = "broadcast";
+                String rest = line.substring(6);
+                int sp = rest.indexOf(' ');
+                if (sp > 0) {
+                    sender = rest.substring(0, sp);
+                    content = rest.substring(sp + 1);
+                } else {
+                    sender = rest;
+                    content = "";
+                }
+            } else if (line != null && line.startsWith("MSG ")) {
+                type = "message";
+                String rest = line.substring(4);
+                int sp = rest.indexOf(' ');
+                if (sp > 0) {
+                    sender = rest.substring(0, sp);
+                    content = rest.substring(sp + 1);
+                } else {
+                    sender = rest;
+                    content = "";
+                }
+            }
+            broadcast("message", mapStatic("type", type, "sender", sender, "content", content, "raw", line, "timestamp", now()));
         }
 
         @Override
@@ -1115,6 +1212,21 @@ public class WebBridgeServer {
         }
 
         @Override
+        public void onFileReceived(String filename, long bytes, String localPath) {
+            if (session == null || filename == null) {
+                return;
+            }
+            String agentId = session.cfg.getUsername();
+            if (!session.receivedFiles.contains(filename)) {
+                session.receivedFiles.add(filename);
+            }
+            Map<String, Object> detail = mapStatic("filename", filename, "bytes", bytes, "localPath", localPath, "timestamp", now(), "agentId", agentId);
+            session.receivedFilesDetail.add(detail);
+            broadcast("log", mapStatic("level", "INFO", "line", "PUSH diterima: " + filename + " (" + bytes + " byte) -> " + localPath, "timestamp", now()));
+            broadcast("transfer", mapStatic("direction", "PUSH", "filename", filename, "bytesTransferred", bytes, "totalBytes", bytes, "status", "complete", "agentId", agentId, "timestamp", now()));
+        }
+
+        @Override
         public void onConnectionLost(String reason, boolean willReconnect, boolean byServer) {
             if (session != null) {
                 session.connected = false;
@@ -1153,6 +1265,7 @@ public class WebBridgeServer {
         public final WebListener listener;
         public final List<String> stagedFiles = new CopyOnWriteArrayList<>();
         public final List<String> receivedFiles = new CopyOnWriteArrayList<>();
+        public final List<Map<String, Object>> receivedFilesDetail = new CopyOnWriteArrayList<>();
         public final CopyOnWriteArrayList<OutputStream> sseClients = new CopyOnWriteArrayList<>();
         public volatile boolean connected;
         public volatile boolean subscribed;

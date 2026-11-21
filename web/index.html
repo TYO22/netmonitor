@@ -113,6 +113,7 @@
           <div class="workspace-tabs">
             <button class="ws-tab active" data-tab="diag" id="tab-diag">Diagnostics &amp; Remote Exec</button>
             <button class="ws-tab" data-tab="files" id="tab-files">Patch &amp; File Transfer</button>
+            <button class="ws-tab" data-tab="comms" id="tab-comms">Team Comms</button>
           </div>
 
           <div class="ws-content" id="ws-diag">
@@ -192,6 +193,24 @@
               </section>
             </div>
           </div>
+          <div class="ws-content hidden" id="ws-comms">
+            <div class="chat-panel">
+              <div id="chat-feed" class="log-feed chat-feed"></div>
+              <div class="reply-bar">
+                <label class="field diag-field">
+                  <span>Target</span>
+                  <select id="chat-target">
+                    <option value="ALL">ALL (Broadcast)</option>
+                  </select>
+                </label>
+                <label class="field diag-field reply-message">
+                  <span>Message</span>
+                  <input id="chat-message" type="text" placeholder="Message">
+                </label>
+                <button id="chat-send" class="btn primary">Send</button>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section class="panel log-panel">
@@ -208,36 +227,53 @@
         <div class="topbar-left">
           <span class="wordmark">NetMonitor Agent</span>
           <span class="session-tag" id="agent-session-tag">AGENT</span>
+          <span class="heartbeat" id="agent-heartbeat">
+            <span class="telemetry-dot"></span>
+            <span>Heartbeat &amp; UDP Active</span>
+          </span>
         </div>
         <div class="topbar-right">
           <button id="agent-disconnect-btn" class="btn bordered">Disconnect</button>
         </div>
       </header>
       <main class="container">
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Received Files</h2>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Filename</th>
-                  <th>Bytes</th>
-                  <th>Timestamp</th>
-                  <th>Local Path</th>
-                </tr>
-              </thead>
-              <tbody id="agent-files-body"></tbody>
-            </table>
-          </div>
-        </section>
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Operator Messages</h2>
-          </div>
-          <div id="agent-msg-feed" class="log-feed"></div>
-        </section>
+        <div class="agent-grid">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Received Files (PUSH)</h2>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Filename</th>
+                    <th>Bytes</th>
+                    <th>Timestamp</th>
+                    <th>Local Path</th>
+                  </tr>
+                </thead>
+                <tbody id="agent-files-body"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel agent-msg-panel">
+            <div class="panel-header">
+              <h2>Operator Messages</h2>
+            </div>
+            <div id="agent-msg-feed" class="log-feed agent-msg-feed"></div>
+            <div class="reply-bar">
+              <label class="field diag-field">
+                <span>Recipient</span>
+                <input id="agent-reply-recipient" type="text" value="admin">
+              </label>
+              <label class="field diag-field reply-message">
+                <span>Message</span>
+                <input id="agent-reply-message" type="text" placeholder="Reply to operator">
+              </label>
+              <button id="agent-reply-send" class="btn primary">Send</button>
+            </div>
+          </section>
+        </div>
       </main>
     </section>
   </div>
