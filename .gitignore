@@ -5,6 +5,7 @@ out/
 *.log
 
 # Dokumen internal perencanaan & pengujian otomatis
+DESIGN.md
 AGENTS.md
 docs/
 tests/

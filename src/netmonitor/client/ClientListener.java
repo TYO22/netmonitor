@@ -50,6 +50,18 @@ public interface ClientListener {
     void onTransferProgress(String direction, long bytesTransferred, long totalExpected);
 
     /**
+     * Berkas push dari server berhasil diterima dan tersimpan di {@code downloads/<agentId>/<namaBerkas>}.
+     * Method ini default agar implementasi lama (konsol) tetap kompilasi tanpa perubahan.
+     *
+     * @param filename   nama berkas datar yang diterima
+     * @param bytes      jumlah byte berkas
+     * @param localPath  path lokal lengkap tempat berkas disimpan
+     */
+    default void onFileReceived(String filename, long bytes, String localPath) {
+        // implementasi konsol tidak memerlukan pencatatan tambahan
+    }
+
+    /**
      * Koneksi terputus.
      *
      * @param reason        penyebab yang sudah berupa kalimat mudah dibaca

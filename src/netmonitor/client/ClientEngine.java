@@ -1029,6 +1029,7 @@ public final class ClientEngine {
                 target.delete();
                 return "ERR ukuran_tidak_sesuai: expected=" + expected + " received=" + received;
             }
+            ui.onFileReceived(filename, received, target.getPath());
             return "OK";
         } catch (IOException e) {
             return "ERR " + describeIo(e);
