@@ -11,13 +11,15 @@ const state = {
   nodes: [],
   stagedFiles: [],
   receivedFiles: [],
-  receivedFilesDetail: []
+  receivedFilesDetail: [],
+  messages: []
 };
 
 const history = new Map();
 let selectedAgent = null;
 let eventSource = null;
 const maxLogLines = 300;
+const SPARK_HEIGHT = 88;
 
 function escapeText(value) {
   return String(value == null ? '' : value);
@@ -39,9 +41,12 @@ function formatTime(iso) {
 
 async function api(path, options) {
   options = options || {};
+  const token = (typeof sessionStorage !== 'undefined') ? sessionStorage.getItem('nm_sid') : null;
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+  if (token) headers['X-Session-Token'] = token;
   const opts = {
     method: options.method || 'GET',
-    headers: Object.assign({ 'Content-Type': 'application/json' }, options.headers || {}),
+    headers: headers,
     credentials: 'same-origin'
   };
   if (options.body !== undefined) {
@@ -150,6 +155,7 @@ async function loadNodes() {
     state.nodes = res.data.nodes;
   }
   renderNodes();
+  updateChatTarget();
 }
 
 function renderAgentFiles() {
@@ -289,7 +295,7 @@ function buildPoints(values, max) {
   return values.map((v, i) => {
     const x = n === 1 ? 0 : (i / (n - 1)) * 200;
     const clamped = Math.max(0, Math.min(max, v));
-    const y = 40 - (clamped / max) * 40;
+    const y = SPARK_HEIGHT - (clamped / max) * SPARK_HEIGHT;
     return x.toFixed(1) + ',' + y.toFixed(1);
   }).join(' ');
 }
@@ -368,6 +374,9 @@ function showWorkspaceTab(tab) {
     updateStagedFilesUI();
     updatePushAgentSelect();
     updatePushFileSelect();
+  }
+  if (tab === 'comms') {
+    renderChatFeed();
   }
 }
 
@@ -620,9 +629,7 @@ function appendAgentMessage(d) {
   feed.scrollTop = feed.scrollHeight;
 }
 
-function appendChatFeed(id, d) {
-  const feed = $(id);
-  if (!feed) return;
+function createChatLine(d) {
   const line = document.createElement('div');
   line.className = 'log-line';
   const ts = document.createElement('span');
@@ -637,11 +644,36 @@ function appendChatFeed(id, d) {
   line.appendChild(ts);
   line.appendChild(sender);
   line.appendChild(text);
-  feed.appendChild(line);
+  return line;
+}
+
+function appendChatFeed(id, d) {
+  const feed = $(id);
+  if (!feed) return;
+  feed.appendChild(createChatLine(d));
   while (feed.children.length > maxLogLines) {
     feed.removeChild(feed.firstChild);
   }
   feed.scrollTop = feed.scrollHeight;
+}
+
+/** Render ulang seluruh pesan dari state ke feed Team Comms (dipakai saat tab dibuka). */
+function renderChatFeed() {
+  const feed = $('chat-feed');
+  if (!feed) return;
+  feed.innerHTML = '';
+  state.messages.slice(-maxLogLines).forEach((d) => {
+    feed.appendChild(createChatLine(d));
+  });
+  feed.scrollTop = feed.scrollHeight;
+}
+
+/** Atur status inline (hijau untuk sukses, merah untuk gagal) di bawah form kirim pesan. */
+function setInlineStatus(id, ok, text) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'inline-status ' + (ok ? 'success' : 'error');
 }
 
 function updateChatTarget() {
@@ -668,9 +700,12 @@ async function sendAgentReply() {
   const res = await api('/api/chat/send', { method: 'POST', body: { target: target, message: message } });
   if (res.ok) {
     if ($('agent-reply-message')) $('agent-reply-message').value = '';
-    appendAgentMessage({ type: 'message', sender: state.username || 'AGENT', content: message, timestamp: new Date().toISOString() });
+    appendAgentMessage({ type: 'message', sender: 'YOU -> ' + target, content: message, timestamp: new Date().toISOString() });
+    setInlineStatus('agent-reply-status', true, '200 OK');
   } else {
-    appendLog({ level: 'ERROR', line: (res.data && res.data.message) || 'Gagal mengirim pesan', timestamp: new Date().toISOString() });
+    const reason = (res.data && res.data.message) || 'Gagal mengirim pesan';
+    appendLog({ level: 'ERROR', line: reason, timestamp: new Date().toISOString() });
+    setInlineStatus('agent-reply-status', false, reason);
   }
 }
 
@@ -681,8 +716,14 @@ async function sendChat() {
   const res = await api('/api/chat/send', { method: 'POST', body: { target: target, message: message } });
   if (res.ok) {
     if ($('chat-message')) $('chat-message').value = '';
+    const echo = { type: 'message', sender: 'YOU -> ' + target, content: message, timestamp: new Date().toISOString() };
+    state.messages.push(echo);
+    renderChatFeed();
+    setInlineStatus('chat-status', true, '200 OK');
   } else {
-    appendLog({ level: 'ERROR', line: (res.data && res.data.message) || 'Gagal mengirim pesan', timestamp: new Date().toISOString() });
+    const reason = (res.data && res.data.message) || 'Gagal mengirim pesan';
+    appendLog({ level: 'ERROR', line: reason, timestamp: new Date().toISOString() });
+    setInlineStatus('chat-status', false, reason);
   }
 }
 
@@ -691,7 +732,8 @@ function connectStream() {
     eventSource.close();
     eventSource = null;
   }
-  eventSource = new EventSource('/api/stream');
+  const sid = (typeof sessionStorage !== 'undefined') ? sessionStorage.getItem('nm_sid') : null;
+  eventSource = new EventSource('/api/stream' + (sid ? '?sid=' + encodeURIComponent(sid) : ''));
   eventSource.addEventListener('telemetry', (e) => {
     let d = null;
     try { d = JSON.parse(e.data); } catch (err) { return; }
@@ -707,10 +749,14 @@ function connectStream() {
   eventSource.addEventListener('message', (e) => {
     let d = null;
     try { d = JSON.parse(e.data); } catch (err) { return; }
+    state.messages.push(d);
     if (state.role === 'AGENT') {
       appendAgentMessage(d);
     } else {
-      appendChatFeed('chat-feed', d);
+      const comms = $('ws-comms');
+      if (!comms || !comms.classList.contains('hidden')) {
+        renderChatFeed();
+      }
     }
     appendLog({ level: 'INFO', line: (d.raw || d.content || ''), timestamp: d.timestamp });
   });
@@ -776,6 +822,10 @@ async function handleLoginSubmit(ev) {
   state.stagedFiles = [];
   state.receivedFiles = [];
   state.receivedFilesDetail = [];
+  state.messages = [];
+  if (res.data && res.data.sid && typeof sessionStorage !== 'undefined') {
+    sessionStorage.setItem('nm_sid', res.data.sid);
+  }
   if (state.role === 'INSPECTOR') {
     showView('inspector');
     updateSessionTag();
@@ -822,9 +872,11 @@ async function disconnect() {
   state.stagedFiles = [];
   state.receivedFiles = [];
   state.receivedFilesDetail = [];
+  state.messages = [];
   state.subscribed = false;
   selectedAgent = null;
   history.clear();
+  if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem('nm_sid');
   showView('login');
 }
 

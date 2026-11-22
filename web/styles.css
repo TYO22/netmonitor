@@ -135,11 +135,15 @@ input:focus, select:focus {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
 .btn:hover {
   background: var(--bg-hover);
+}
+
+.btn:active {
+  background-color: var(--bg-elevated);
 }
 
 .btn.primary {
@@ -151,6 +155,10 @@ input:focus, select:focus {
 
 .btn.primary:hover {
   background: #E4E4E7;
+}
+
+.btn.primary:active {
+  background-color: #D4D4D8;
 }
 
 .btn.bordered {
@@ -180,6 +188,22 @@ input:focus, select:focus {
   padding: 8px;
   border-radius: 4px;
   font-size: 13px;
+}
+
+.inline-status {
+  min-height: 16px;
+  padding: 4px 12px 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.inline-status.success {
+  color: var(--telemetry-green);
+}
+
+.inline-status.error {
+  color: var(--status-err);
 }
 
 /* ---------- Topbar ---------- */
@@ -382,7 +406,7 @@ tbody tr.selected {
 
 .sparkline {
   width: 100%;
-  height: 48px;
+  height: 88px;
   background: var(--bg-canvas);
   border: 1px solid var(--border-subtle);
   border-radius: 4px;

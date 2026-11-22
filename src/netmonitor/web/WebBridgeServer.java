@@ -218,11 +218,32 @@ public class WebBridgeServer {
     }
 
     private WebSession sessionFromRequest(HttpExchange ex) {
-        String sid = getCookieSid(ex);
-        if (sid == null) {
+        // 1) Prioritas: header X-Session-Token (isolasi per-tab)
+        String sid = ex.getRequestHeaders().getFirst("X-Session-Token");
+        // 2) Query parameter ?sid= (untuk SSE /api/stream yang tidak bisa set header)
+        if (sid == null || sid.trim().isEmpty()) {
+            try {
+                String query = ex.getRequestURI().getQuery();
+                if (query != null) {
+                    for (String part : query.split("&")) {
+                        if (part.startsWith("sid=")) {
+                            sid = java.net.URLDecoder.decode(part.substring(4), java.nio.charset.StandardCharsets.UTF_8);
+                            break;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // abaikan; lanjut ke fallback cookie
+            }
+        }
+        // 3) Fallback: Cookie (kompatibilitas lama)
+        if (sid == null || sid.trim().isEmpty()) {
+            sid = getCookieSid(ex);
+        }
+        if (sid == null || sid.trim().isEmpty()) {
             return null;
         }
-        return sessions.get(sid);
+        return sessions.get(sid.trim());
     }
 
     private void setSessionCookie(HttpExchange ex, String sid, boolean clear) {
@@ -310,43 +331,79 @@ public class WebBridgeServer {
         }
 
         ClientConfig cfg = new ClientConfig(host, port, role, username, password);
-        WebListener listener = new WebListener();
-        ClientEngine engine = new ClientEngine(cfg, listener);
-        WebSession session = new WebSession(UUID.randomUUID().toString(), cfg, engine, listener);
 
-        boolean ok;
-        String message;
-        if (cfg.isAgent()) {
-            CountDownLatch latch = new CountDownLatch(1);
-            listener.setLoginLatch(latch, session);
-            session.agentThread = new Thread(() -> engine.runAgent(), "web-agent-" + username);
-            session.agentThread.setDaemon(true);
-            session.agentThread.start();
-            try {
-                latch.await(AGENT_LOGIN_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            ok = listener.loginSucceeded;
-            message = listener.lastMessage;
-            if (!ok) {
+        WebSession session = null;
+        boolean ok = false;
+        String message = null;
+        // Retry otomatis hingga 3 kali (total 4 percobaan) bila server masih membersihkan
+        // sesi lama (status 400 "Username Sudah Ada" / "sedang dipakai").
+        for (int attempt = 0; attempt < 4 && !ok; attempt++) {
+            if (attempt > 0) {
                 try {
-                    engine.requestQuit();
-                } catch (Exception ignored) {
-                    // abaikan
-                }
-                try {
-                    session.agentThread.join(3000);
-                } catch (InterruptedException ignored) {
+                    Thread.sleep(400);
+                } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                 }
             }
-        } else {
-            listener.setLoginLatch(null, session);
-            ok = engine.connect();
-            message = ok ? listener.lastMessage : listener.lastError;
-            if (message == null || message.isEmpty()) {
-                message = ok ? "Login berhasil" : "Login gagal";
+            WebListener listener = new WebListener();
+            ClientEngine engine = new ClientEngine(cfg, listener);
+            WebSession sess = new WebSession(UUID.randomUUID().toString(), cfg, engine, listener);
+
+            boolean attemptOk;
+            String attemptMsg;
+            if (cfg.isAgent()) {
+                CountDownLatch latch = new CountDownLatch(1);
+                listener.setLoginLatch(latch, sess);
+                sess.agentThread = new Thread(() -> engine.runAgent(), "web-agent-" + username);
+                sess.agentThread.setDaemon(true);
+                sess.agentThread.start();
+                try {
+                    latch.await(AGENT_LOGIN_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                attemptOk = listener.loginSucceeded;
+                attemptMsg = listener.lastMessage;
+                if (!attemptOk) {
+                    try {
+                        engine.requestQuit();
+                    } catch (Exception ignored) {
+                        // abaikan
+                    }
+                    try {
+                        sess.agentThread.join(3000);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            } else {
+                listener.setLoginLatch(null, sess);
+                attemptOk = engine.connect();
+                attemptMsg = attemptOk ? listener.lastMessage : listener.lastError;
+                if (attemptMsg == null || attemptMsg.isEmpty()) {
+                    attemptMsg = attemptOk ? "Login berhasil" : "Login gagal";
+                }
+            }
+
+            if (attemptOk) {
+                sess.connected = true;
+                if (attemptMsg == null || attemptMsg.isEmpty()) {
+                    attemptMsg = "Login berhasil";
+                }
+                session = sess;
+                ok = true;
+                message = attemptMsg;
+                break;
+            }
+            message = attemptMsg;
+            try {
+                engine.close();
+            } catch (Exception ignored) {
+                // abaikan
+            }
+            // hanya retry bila kegagalan karena username masih dalam proses cleanup
+            if (message == null || !message.contains("sedang dipakai")) {
+                break;
             }
         }
 
@@ -364,7 +421,8 @@ public class WebBridgeServer {
                 "ok", true,
                 "message", message,
                 "role", cfg.getRole(),
-                "username", cfg.getUsername()
+                "username", cfg.getUsername(),
+                "sid", session.id
         ));
     }
 
@@ -398,6 +456,12 @@ public class WebBridgeServer {
             }
         } catch (Exception ignored) {
             // abaikan
+        }
+        // beri waktu agar cleanup() di server TCP selesai sebelum respons HTTP dikembalikan
+        try {
+            Thread.sleep(150);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
         }
         try {
             if (!s.cfg.isAgent()) {

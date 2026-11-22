@@ -93,7 +93,7 @@
                 <span>CPU History (40s)</span>
                 <span id="cpu-readout" class="readout tabular">0.0%</span>
               </div>
-              <svg id="cpu-spark" class="sparkline" viewBox="0 0 200 40" preserveAspectRatio="none" aria-hidden="true">
+              <svg id="cpu-spark" class="sparkline" viewBox="0 0 200 88" preserveAspectRatio="none" aria-hidden="true">
                 <polyline points="" fill="none" stroke="var(--telemetry-green)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></polyline>
               </svg>
             </div>
@@ -102,7 +102,7 @@
                 <span>Memory History (40s)</span>
                 <span id="mem-readout" class="readout tabular">0.0%</span>
               </div>
-              <svg id="mem-spark" class="sparkline" viewBox="0 0 200 40" preserveAspectRatio="none" aria-hidden="true">
+              <svg id="mem-spark" class="sparkline" viewBox="0 0 200 88" preserveAspectRatio="none" aria-hidden="true">
                 <polyline points="" fill="none" stroke="var(--telemetry-green)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></polyline>
               </svg>
             </div>
@@ -209,6 +209,7 @@
                 </label>
                 <button id="chat-send" class="btn primary">Send</button>
               </div>
+              <div id="chat-status" class="inline-status"></div>
             </div>
           </div>
         </section>
@@ -272,6 +273,7 @@
               </label>
               <button id="agent-reply-send" class="btn primary">Send</button>
             </div>
+            <div id="agent-reply-status" class="inline-status"></div>
           </section>
         </div>
       </main>
