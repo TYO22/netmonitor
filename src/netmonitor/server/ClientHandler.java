@@ -356,6 +356,15 @@ public class ClientHandler implements Runnable {
                 return doLogin(p);
             case "QUIT":
             case "EXIT":
+                // Atomik: bebaskan slot sesi (dan berhenti berlangganan telemetri) SEBELUM
+                // balasan BYE dikirim, sehingga re-login dapat langsung berhasil tanpa
+                // menunggu cleanup() di finally. (Anti-regresi: tes CLI tetap menerima BYE.)
+                if (username != null) {
+                    String u = username;
+                    if (server.getSessions().remove(u, this)) {
+                        server.getTelemetry().unsubscribe(u);
+                    }
+                }
                 send(Protocol.ok("BYE Sesi Berhasil Ditutup"));
                 return false;
             case "LIST":

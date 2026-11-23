@@ -264,12 +264,14 @@
             <div id="agent-msg-feed" class="log-feed agent-msg-feed"></div>
             <div class="reply-bar">
               <label class="field diag-field">
-                <span>Recipient</span>
-                <input id="agent-reply-recipient" type="text" value="admin">
+                <span>Target</span>
+                <select id="agent-reply-recipient">
+                  <option value="admin">admin</option>
+                </select>
               </label>
               <label class="field diag-field reply-message">
                 <span>Message</span>
-                <input id="agent-reply-message" type="text" placeholder="Reply to operator">
+                <input id="agent-reply-message" type="text" placeholder="Message">
               </label>
               <button id="agent-reply-send" class="btn primary">Send</button>
             </div>

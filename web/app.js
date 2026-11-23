@@ -12,12 +12,18 @@ const state = {
   stagedFiles: [],
   receivedFiles: [],
   receivedFilesDetail: [],
-  messages: []
+  messages: [],
+  knownRecipients: new Set(['admin']),
+  recipientAgents: []
 };
 
 const history = new Map();
 let selectedAgent = null;
 let eventSource = null;
+let nodesPollTimer = null;
+let loadingNodes = false;
+let recipientsPollTimer = null;
+let loadingRecipients = false;
 const maxLogLines = 300;
 const SPARK_HEIGHT = 88;
 
@@ -103,11 +109,14 @@ async function loadState() {
       updateStagedFilesUI();
       updatePushFileSelect();
       updateChatTarget();
-      if (state.nodes.length === 0) loadNodes();
+      loadNodes();
+      startNodesPolling();
     } else if (state.role === 'AGENT') {
       showView('agent');
       updateAgentTag();
       renderAgentFiles();
+      loadRecipientNodesForAgent();
+      startRecipientsPolling();
     }
     connectStream();
   } else {
@@ -149,13 +158,68 @@ function updateTelemetryButton() {
 }
 
 async function loadNodes() {
-  const res = await api('/api/nodes');
-  if (!res.ok || !res.data) return;
-  if (Array.isArray(res.data.nodes)) {
-    state.nodes = res.data.nodes;
+  if (loadingNodes) return;
+  loadingNodes = true;
+  try {
+    const res = await api('/api/nodes');
+    if (!res.ok || !res.data) return;
+    const fresh = Array.isArray(res.data.nodes) ? res.data.nodes : [];
+    const freshIds = new Set(fresh.map((n) => n.agentId));
+    const merged = new Map(state.nodes.map((n) => [n.agentId, n]));
+    fresh.forEach((n) => {
+      const id = n.agentId;
+      if (!id) return;
+      const existing = merged.get(id);
+      if (existing) {
+        existing.role = n.role || existing.role;
+        existing.location = n.location || existing.location;
+        existing.isp = n.isp || existing.isp;
+        existing.status = 'ONLINE';
+      } else {
+        merged.set(id, Object.assign({}, n, { status: 'ONLINE' }));
+      }
+    });
+    state.nodes.forEach((n) => {
+      if (!freshIds.has(n.agentId)) n.status = 'OFFLINE';
+    });
+    state.nodes = Array.from(merged.values());
+    renderNodes();
+    updateChatTarget();
+    updateAgentRecipients();
+  } finally {
+    loadingNodes = false;
   }
-  renderNodes();
-  updateChatTarget();
+}
+
+/** Jalankan auto-polling node tiap 5 detik saat sesi INSPECTOR aktif. */
+function startNodesPolling() {
+  stopNodesPolling();
+  nodesPollTimer = setInterval(() => {
+    if (state.connected && state.role === 'INSPECTOR') loadNodes();
+  }, 5000);
+}
+
+function stopNodesPolling() {
+  if (nodesPollTimer) {
+    clearInterval(nodesPollTimer);
+    nodesPollTimer = null;
+  }
+}
+
+/** Jalankan auto-polling daftar penerima tiap 5 detik saat sesi AGENT aktif. */
+function startRecipientsPolling() {
+  stopRecipientsPolling();
+  recipientsPollTimer = setInterval(() => {
+    if (state.connected && state.role === 'AGENT') loadRecipientNodesForAgent();
+  }, 5000);
+}
+
+/** Hentikan auto-polling daftar penerima dan bersihkan timer. */
+function stopRecipientsPolling() {
+  if (recipientsPollTimer) {
+    clearInterval(recipientsPollTimer);
+    recipientsPollTimer = null;
+  }
 }
 
 function renderAgentFiles() {
@@ -218,7 +282,7 @@ function renderNodes() {
       createCell('td', node.location || '-', ''),
       createBarCell(cpu == null ? null : cpuPct, cpu == null ? '-' : (cpu * 100).toFixed(1) + '%'),
       createBarCell(ram == null ? null : ramPct, ram == null ? '-' : ram.toFixed(1) + '%'),
-      createCell('td', '', '')
+      createActionsCell(node)
     ];
     cells.forEach((c) => tr.appendChild(c));
     body.appendChild(tr);
@@ -271,6 +335,91 @@ function createBarCell(value, label) {
   val.textContent = escapeText(label);
   wrap.appendChild(track);
   wrap.appendChild(val);
+  td.appendChild(wrap);
+  return td;
+}
+
+/**
+ * Pilih node sebagai target grafik Selected Node Telemetry.
+ * Baris tabel yang aktif ditandai lewat kelas CSS `.selected`, dan tombol
+ * Inspect-nya menyala lewat kelas `.active`.
+ *
+ * @param {string} agentId - ID node yang dipilih menjadi node aktif.
+ */
+function selectNodeAgent(agentId) {
+  selectedAgent = agentId;
+  renderNodes();
+  updateSparkline();
+}
+
+/**
+ * Buka tab workspace, lalu arahkan dropdown target ke node tertentu.
+ * Nilai hanya dipasang bila opsi tersedia (misalnya dropdown Diagnostics
+ * hanya memuat peran AGENT), sehingga tidak pernah memicu nilai kosong.
+ *
+ * @param {string} tab - Kunci tab: 'diag', 'files', atau 'comms'.
+ * @param {string} selectId - ID elemen <select> yang akan diatur.
+ * @param {string} agentId - Nilai opsi tujuan.
+ */
+function openWorkspaceTabFor(tab, selectId, agentId) {
+  showWorkspaceTab(tab);
+  const sel = $(selectId);
+  if (!sel || !agentId) return;
+  const options = Array.prototype.slice.call(sel.options);
+  if (!options.some((o) => o.value === agentId)) return;
+  sel.value = agentId;
+}
+
+/**
+ * Buat satu tombol pintasan ringkas (`.btn sm`) untuk sel Actions.
+ *
+ * @param {string} label - Teks tombol (mis. Inspect, Ping, Msg).
+ * @param {string} title - Tooltip penjelas fungsi tombol.
+ * @param {Function} onClick - Handler klik dengan `stopPropagation` di dalamnya.
+ * @returns {HTMLButtonElement} Tombol siap pakai.
+ */
+function createActionButton(label, title, onClick) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn sm bordered';
+  btn.textContent = label;
+  btn.title = title;
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+/**
+ * Bangun isi sel Actions untuk satu node: Inspect, Ping, dan Msg.
+ * Klik tombol dihentikan propagasinya agar tidak ikut memicu pemilihan baris
+ * (kecuali Inspect yang memang bertugas memilih node).
+ *
+ * @param {Object} node - Data node dari `state.nodes`.
+ * @returns {HTMLTableCellElement} Sel tabel Actions berisi tiga tombol.
+ */
+function createActionsCell(node) {
+  const td = document.createElement('td');
+  const wrap = document.createElement('div');
+  wrap.className = 'row-actions';
+
+  const inspect = createActionButton('Inspect', 'Select this node for Selected Node Telemetry', (ev) => {
+    ev.stopPropagation();
+    selectNodeAgent(node.agentId);
+  });
+  if (selectedAgent === node.agentId) inspect.classList.add('active');
+
+  const ping = createActionButton('Ping', 'Open Diagnostics & Remote Exec with this target', (ev) => {
+    ev.stopPropagation();
+    openWorkspaceTabFor('diag', 'diag-agent', node.agentId);
+  });
+
+  const msg = createActionButton('Msg', 'Open Team Comms with this target', (ev) => {
+    ev.stopPropagation();
+    openWorkspaceTabFor('comms', 'chat-target', node.agentId);
+  });
+
+  wrap.appendChild(inspect);
+  wrap.appendChild(ping);
+  wrap.appendChild(msg);
   td.appendChild(wrap);
   return td;
 }
@@ -435,6 +584,100 @@ function updatePushAgentSelect() {
   if (current && [...sel.options].some((o) => o.value === current)) {
     sel.value = current;
   }
+}
+
+/**
+ * Perbarui daftar pilihan <select> Target Agent (admin di posisi pertama).
+ * Dilindungi guard `loadingRecipients` agar request tidak bertumpuk ketika
+ * polling 5 detik dan refresh instan (focus/mousedown) terjadi bersamaan.
+ */
+async function updateAgentRecipients() {
+  const sel = $('agent-reply-recipient');
+  if (!sel) return;
+  if (loadingRecipients) return;
+  loadingRecipients = true;
+  // Pilihan pengguna diambil sekali di awal agar tidak hilang saat render lokal
+  // sementara belum memuat username dari server.
+  const preferred = sel.value;
+  // Dideklarasikan di sini (bukan di dalam try) agar tersedia untuk render lokal
+  // maupun sinkronisasi server; deklarasi terlambat di dalam try akan melanggar
+  // temporal dead zone dan membuat seluruh fungsi batal dirender.
+  const myUsername = state.username || '';
+  const sortIds = (ids) => [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const render = (ids) => {
+    sel.innerHTML = '';
+    ids.forEach((id) => {
+      const o = document.createElement('option');
+      o.value = id || '';
+      o.textContent = escapeText(id || '');
+      sel.appendChild(o);
+    });
+    if (preferred && [...sel.options].some((o) => o.value === preferred)) {
+      sel.value = preferred;
+    } else if (sel.options.length > 0 && sel.options[0].value === 'admin') {
+      sel.value = 'admin';
+    }
+  };
+  try {
+    // 1) Render cepat dari state lokal (tanpa jaringan)
+    const local = new Set(['admin']);
+    state.knownRecipients.forEach((r) => {
+      if (r && r !== myUsername && !isSelfSenderLabel(r)) local.add(r);
+    });
+    state.recipientAgents.forEach((id) => {
+      if (id && id !== myUsername && !isSelfSenderLabel(id)) local.add(id);
+    });
+    state.nodes.forEach((n) => {
+      const id = n && n.agentId;
+      if (id && id !== myUsername && !isSelfSenderLabel(id)) local.add(id);
+    });
+    render(sortIds(local));
+    // 2) Sinkronkan dengan sesi aktif terbaru dari server
+    const res = await api('/api/recipients');
+    if (!res.ok || !res.data) return;
+    const serverList = extractRecipients(res.data);
+    // Simpan daftar sesi aktif dari server ke state.recipientAgents
+    // (tanpa username sendiri dan tanpa label pengirim "YOU -> ...").
+    const fromServer = serverList.filter((id) => id && id !== myUsername && !isSelfSenderLabel(id));
+    state.recipientAgents = fromServer;
+    const merged = new Set(['admin']);
+    fromServer.forEach((id) => merged.add(id));
+    state.knownRecipients.forEach((r) => {
+      if (r && r !== myUsername && !isSelfSenderLabel(r)) merged.add(r);
+    });
+    state.nodes.forEach((n) => {
+      const id = n && n.agentId;
+      if (id && id !== myUsername && !isSelfSenderLabel(id)) merged.add(id);
+    });
+    render(sortIds(merged));
+  } catch (e) {
+    // Kegagalan jaringan: biarkan daftar lokal yang sudah dirender
+  } finally {
+    loadingRecipients = false;
+  }
+}
+
+/**
+ * Ekstrak daftar username dari respons `GET /api/recipients`.
+ * Properti `recipients` (array string) dikirim oleh `WebBridgeServer`.
+ *
+ * @param {Object} data - Body JSON respons.
+ * @returns {string[]} Daftar username; kosong bila format tidak dikenali.
+ */
+function extractRecipients(data) {
+  if (!data) return [];
+  if (Array.isArray(data)) return data.slice();
+  if (Array.isArray(data.recipients)) return data.recipients.slice();
+  return [];
+}
+
+/**
+ * Perbarui daftar penerima dari server dan masukkan ke `state.recipientAgents`.
+ * Menggantikan pemanggilan `/api/nodes` yang menolak peran AGENT (403).
+ */
+async function loadRecipientNodesForAgent() {
+  if (state.role !== 'AGENT') return;
+  await updateAgentRecipients();
 }
 
 function appendPushStatus(text) {
@@ -605,9 +848,32 @@ function appendLog(d) {
   feed.scrollTop = feed.scrollHeight;
 }
 
+/**
+ * Cek apakah label pengirim merupakan penanda pesan keluar ("YOU -> ...")
+ * atau username sesi sendiri. Label seperti ini hanya untuk tampilan feed,
+ * bukan kandidat penerima dropdown Target.
+ *
+ * @param {string} sender - Nilai `sender` dari entri chat.
+ * @returns {boolean} true bila label bukan penerima yang sah.
+ */
+function isSelfSenderLabel(sender) {
+  if (!sender) return false;
+  const s = String(sender).trim();
+  if (s.toUpperCase().startsWith('YOU ->') || s.toUpperCase().startsWith('YOU→')) {
+    return true;
+  }
+  const me = state.username ? String(state.username).trim() : '';
+  return !!me && s === me;
+}
+
 function appendAgentMessage(d) {
   const feed = $('agent-msg-feed');
   if (!feed) return;
+  // Jangan masukkan label pengiriman sendiri ("YOU -> ...") ke daftar penerima.
+  if (d && d.sender && !isSelfSenderLabel(d.sender)) {
+    state.knownRecipients.add(d.sender);
+  }
+  updateAgentRecipients();
   const line = document.createElement('div');
   line.className = 'log-line';
   const ts = document.createElement('span');
@@ -701,7 +967,7 @@ async function sendAgentReply() {
   if (res.ok) {
     if ($('agent-reply-message')) $('agent-reply-message').value = '';
     appendAgentMessage({ type: 'message', sender: 'YOU -> ' + target, content: message, timestamp: new Date().toISOString() });
-    setInlineStatus('agent-reply-status', true, '200 OK');
+    setInlineStatus('agent-reply-status', true, '');
   } else {
     const reason = (res.data && res.data.message) || 'Gagal mengirim pesan';
     appendLog({ level: 'ERROR', line: reason, timestamp: new Date().toISOString() });
@@ -719,7 +985,7 @@ async function sendChat() {
     const echo = { type: 'message', sender: 'YOU -> ' + target, content: message, timestamp: new Date().toISOString() };
     state.messages.push(echo);
     renderChatFeed();
-    setInlineStatus('chat-status', true, '200 OK');
+    setInlineStatus('chat-status', true, '');
   } else {
     const reason = (res.data && res.data.message) || 'Gagal mengirim pesan';
     appendLog({ level: 'ERROR', line: reason, timestamp: new Date().toISOString() });
@@ -749,6 +1015,8 @@ function connectStream() {
   eventSource.addEventListener('message', (e) => {
     let d = null;
     try { d = JSON.parse(e.data); } catch (err) { return; }
+    if (d && d.sender && !isSelfSenderLabel(d.sender)) state.knownRecipients.add(d.sender);
+    if (state.role === 'AGENT') updateAgentRecipients();
     state.messages.push(d);
     if (state.role === 'AGENT') {
       appendAgentMessage(d);
@@ -789,6 +1057,8 @@ function connectStream() {
     try { d = JSON.parse(e.data); } catch (err) { d = {}; }
     appendLog({ level: 'ERROR', line: 'Disconnected: ' + (d.reason || ''), timestamp: d.timestamp });
     state.connected = false;
+    stopNodesPolling();
+    stopRecipientsPolling();
     showView('login');
     setLoginError('Koneksi terputus: ' + (d.reason || ''));
   });
@@ -823,6 +1093,8 @@ async function handleLoginSubmit(ev) {
   state.receivedFiles = [];
   state.receivedFilesDetail = [];
   state.messages = [];
+  state.knownRecipients = new Set(['admin']);
+  state.recipientAgents = [];
   if (res.data && res.data.sid && typeof sessionStorage !== 'undefined') {
     sessionStorage.setItem('nm_sid', res.data.sid);
   }
@@ -831,10 +1103,13 @@ async function handleLoginSubmit(ev) {
     updateSessionTag();
     updateTelemetryButton();
     loadNodes();
+    startNodesPolling();
   } else {
     showView('agent');
     updateAgentTag();
     renderAgentFiles();
+    loadRecipientNodesForAgent();
+    startRecipientsPolling();
   }
   connectStream();
 }
@@ -862,6 +1137,8 @@ async function toggleTelemetry() {
 }
 
 async function disconnect() {
+  stopNodesPolling();
+  stopRecipientsPolling();
   if (eventSource) {
     eventSource.close();
     eventSource = null;
@@ -907,7 +1184,22 @@ document.addEventListener('DOMContentLoaded', () => {
   if (fp) fp.addEventListener('click', handleFilePush);
   const cs = $('chat-send');
   if (cs) cs.addEventListener('click', sendChat);
+  const cms = $('chat-message');
+  if (cms) cms.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  });
   const ars = $('agent-reply-send');
   if (ars) ars.addEventListener('click', sendAgentReply);
+  const arr = $('agent-reply-recipient');
+  if (arr) {
+    // Refresh instan saat dropdown dibuka (focus / mousedown) agar node yang
+    // baru login langsung muncul tanpa menunggu siklus polling 5 detik.
+    arr.addEventListener('focus', () => loadRecipientNodesForAgent());
+    arr.addEventListener('mousedown', () => loadRecipientNodesForAgent());
+  }
+  const ams = $('agent-reply-message');
+  if (ams) ams.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAgentReply(); }
+  });
   loadState();
 });
