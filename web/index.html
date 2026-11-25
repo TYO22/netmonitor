@@ -113,46 +113,65 @@
           <div class="workspace-tabs">
             <button class="ws-tab active" data-tab="diag" id="tab-diag">Diagnostics &amp; Remote Exec</button>
             <button class="ws-tab" data-tab="files" id="tab-files">Patch &amp; File Transfer</button>
-            <button class="ws-tab" data-tab="comms" id="tab-comms">Team Comms</button>
+            <button class="ws-tab" data-tab="comms" id="tab-comms">Team Comms <span id="comms-unread-dot" class="unread-dot hidden" aria-label="Pesan baru"></span></button>
           </div>
 
           <div class="ws-content" id="ws-diag">
-            <div class="diag-toolbar">
-              <label class="field diag-field">
-                <span>Target Agent</span>
-                <select id="diag-agent"></select>
-              </label>
-              <label class="field diag-field">
-                <span>PING Host</span>
-                <input id="diag-ping-host" type="text" placeholder="8.8.8.8">
-              </label>
-              <button id="diag-ping-btn" class="btn bordered">PING</button>
-              <label class="field diag-field">
-                <span>RESOLVE Domain</span>
-                <input id="diag-resolve-domain" type="text" placeholder="example.com">
-              </label>
-              <button id="diag-resolve-btn" class="btn bordered">RESOLVE</button>
+            <!-- Kontainer atas: Server Network Diagnostics (dieksekusi di NetMonitorServer, bukan per-agent) -->
+            <div class="diag-card server-diag-card">
+              <div class="card-header">
+                <span class="card-title">Server Network Diagnostics</span>
+                <span class="badge badge-server">NetMonitorServer</span>
+              </div>
+              <div class="diag-server-grid">
+                <div class="diag-server-cell">
+                  <label class="field diag-field diag-field-row">
+                    <span>PING Host</span>
+                    <input id="diag-host" type="text" placeholder="8.8.8.8">
+                  </label>
+                  <button id="diag-ping-btn" class="btn bordered">PING</button>
+                </div>
+                <div class="diag-server-cell">
+                  <label class="field diag-field diag-field-row">
+                    <span>RESOLVE Domain</span>
+                    <input id="diag-domain" type="text" placeholder="example.com">
+                  </label>
+                  <button id="diag-resolve-btn" class="btn bordered">RESOLVE</button>
+                </div>
+              </div>
+              <div id="diag-server-output" class="diag-output mono"></div>
             </div>
-            <div class="diag-grid">
-              <section class="diag-panel">
-                <div class="diag-head">
-                  <span>System Information</span>
-                  <span class="diag-cmd">(SYSINFO)</span>
-                </div>
-                <button id="diag-sysinfo-btn" class="btn primary full">Fetch SysInfo</button>
-                <div id="diag-sysinfo-output" class="diag-output mono"></div>
-              </section>
-              <section class="diag-panel">
-                <div class="diag-head">
-                  <span>Remote Command</span>
-                  <span class="diag-cmd">(EXEC)</span>
-                </div>
-                <div class="diag-exec-input">
-                  <input id="diag-exec-command" type="text" placeholder="hostname">
-                  <button id="diag-exec-btn" class="btn primary full">Run</button>
-                </div>
-                <div id="diag-exec-output" class="diag-output mono"></div>
-              </section>
+
+            <!-- Kontainer bawah: Agent Remote Operations (didelegasikan ke Target Agent via REQ/RES) -->
+            <div class="diag-card agent-diag-card">
+              <div class="card-header agent-card-header">
+                <span class="card-title">Agent Remote Operations</span>
+                <label class="field diag-field">
+                  <span>Target Agent</span>
+                  <select id="diag-agent"></select>
+                </label>
+              </div>
+              <div class="diag-grid">
+                <section class="diag-panel">
+                  <div class="diag-head">
+                    <span>System Information</span>
+                    <span class="diag-cmd">(SYSINFO)</span>
+                  </div>
+                  <button id="diag-sysinfo-btn" class="btn primary full">Fetch SysInfo</button>
+                  <div id="diag-sysinfo-output" class="diag-output mono"></div>
+                </section>
+                <section class="diag-panel">
+                  <div class="diag-head">
+                    <span>Remote Command</span>
+                    <span class="diag-cmd">(EXEC)</span>
+                  </div>
+                  <div class="diag-exec-row">
+                    <input id="diag-exec-cmd" type="text" placeholder="hostname">
+                    <button id="diag-exec-btn" class="btn primary">Run</button>
+                  </div>
+                  <div id="diag-exec-output" class="diag-output mono"></div>
+                </section>
+              </div>
             </div>
           </div>
 

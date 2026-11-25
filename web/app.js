@@ -45,6 +45,28 @@ function formatTime(iso) {
   }
 }
 
+/**
+ * Format pesan error dari respons server menjadi teks pengguna yang mudah dibaca.
+ * Diberikan rawError (string atau object dengan pesan) serta targetAgent (string ID agent).
+ * @param {string|Object} rawError - Pesan error dari server (bisa string atau res.data.message).
+ * @param {string} targetAgent - ID agent target (digunakan pada teks jika error merujuk agent).
+ * @returns {string} Teks error yang sudah diformat untuk tampilan Web GUI.
+ */
+function formatWebError(rawError, targetAgent) {
+  const msg = String(rawError || '');
+  // 1) Agent tidak ditemukan / 404
+  if (/404|Agent Tidak Ditemukan/i.test(msg)) {
+    return 'Agent "' + escapeText(targetAgent) + '" sedang OFFLINE atau tidak terhubung ke server. Periksa status node pada tabel Systems.';
+  }
+  // 2) Koneksi terputus saat menunggu respons 502
+  if (/502|Terputus Saat Menunggu Respons/i.test(msg)) {
+    return 'Koneksi ke agent "' + escapeText(targetAgent) + '" terputus di tengah proses sebelum respons selesai diterima.';
+  }
+  // 3) Bersihkan kode protokol mentah seperti 400 ERR, 403 ERR sisa alasan
+  const cleaned = msg.replace(/^\s*\d{3}\s*/i, '').replace(/\b\d{3}\b/g, '').trim();
+  return cleaned || 'Gagal';
+}
+
 async function api(path, options) {
   options = options || {};
   const token = (typeof sessionStorage !== 'undefined') ? sessionStorage.getItem('nm_sid') : null;
@@ -373,7 +395,7 @@ function openWorkspaceTabFor(tab, selectId, agentId) {
 /**
  * Buat satu tombol pintasan ringkas (`.btn sm`) untuk sel Actions.
  *
- * @param {string} label - Teks tombol (mis. Inspect, Ping, Msg).
+ * @param {string} label - Teks tombol (mis. Inspect, Msg).
  * @param {string} title - Tooltip penjelas fungsi tombol.
  * @param {Function} onClick - Handler klik dengan `stopPropagation` di dalamnya.
  * @returns {HTMLButtonElement} Tombol siap pakai.
@@ -389,12 +411,14 @@ function createActionButton(label, title, onClick) {
 }
 
 /**
- * Bangun isi sel Actions untuk satu node: Inspect, Ping, dan Msg.
+ * Bangun isi sel Actions untuk satu node: Inspect dan Msg.
+ * Hanya pintasan yang benar-benar menargetkan node tersebut yang ditampilkan;
+ * PING/RESOLVE tidak disertakan karena dijalankan di NetMonitorServer, bukan per-agent.
  * Klik tombol dihentikan propagasinya agar tidak ikut memicu pemilihan baris
  * (kecuali Inspect yang memang bertugas memilih node).
  *
  * @param {Object} node - Data node dari `state.nodes`.
- * @returns {HTMLTableCellElement} Sel tabel Actions berisi tiga tombol.
+ * @returns {HTMLTableCellElement} Sel tabel Actions berisi dua tombol.
  */
 function createActionsCell(node) {
   const td = document.createElement('td');
@@ -407,18 +431,31 @@ function createActionsCell(node) {
   });
   if (selectedAgent === node.agentId) inspect.classList.add('active');
 
-  const ping = createActionButton('Ping', 'Open Diagnostics & Remote Exec with this target', (ev) => {
-    ev.stopPropagation();
-    openWorkspaceTabFor('diag', 'diag-agent', node.agentId);
-  });
-
   const msg = createActionButton('Msg', 'Open Team Comms with this target', (ev) => {
     ev.stopPropagation();
-    openWorkspaceTabFor('comms', 'chat-target', node.agentId);
+    showWorkspaceTab('comms');
+    const sel = $('chat-target');
+    if (sel && node.agentId) {
+      sel.value = node.agentId;
+    }
+    const panel = $('ws-comms');
+    if (panel) {
+      panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    const input = $('chat-message');
+    if (input) {
+      input.focus();
+    }
   });
 
+  // Node OFFLINE: Inspect tetap aktif agar riwayat telemetri terakhir bisa dilihat;
+  // hanya Msg yang dinonaktifkan karena agent tidak dapat menerima pesan.
+  if (String(node.status || '').toUpperCase() === 'OFFLINE') {
+    msg.disabled = true;
+    msg.title = 'Agent sedang OFFLINE';
+  }
+
   wrap.appendChild(inspect);
-  wrap.appendChild(ping);
   wrap.appendChild(msg);
   td.appendChild(wrap);
   return td;
@@ -496,13 +533,22 @@ function updateDiagnosticsDropdown() {
   if (!sel) return;
   const current = sel.value;
   sel.innerHTML = '';
-  state.nodes.forEach((node) => {
-    if (String(node.role || '').toUpperCase() === 'AGENT') {
-      const o = document.createElement('option');
-      o.value = node.agentId || '';
-      o.textContent = escapeText(node.agentId);
-      sel.appendChild(o);
-    }
+  const sorted = state.nodes
+    .filter((node) => String(node.role || '').toUpperCase() === 'AGENT')
+    .sort((a, b) => {
+      const sa = String(a.status || '').toUpperCase();
+      const sb = String(b.status || '').toUpperCase();
+      const rank = (s) => (s === 'ONLINE' ? 0 : s === 'OFFLINE' ? 1 : 2);
+      const ra = rank(sa);
+      const rb = rank(sb);
+      if (ra !== rb) return ra - rb;
+      return String(a.agentId || '').localeCompare(String(b.agentId || ''));
+    });
+  sorted.forEach((node) => {
+    const o = document.createElement('option');
+    o.value = node.agentId || '';
+    o.textContent = escapeText((node.agentId || '') + ' (' + (node.status || 'ONLINE') + ')');
+    sel.appendChild(o);
   });
   if (current && [...sel.options].some((o) => o.value === current)) {
     sel.value = current;
@@ -525,6 +571,9 @@ function showWorkspaceTab(tab) {
     updatePushFileSelect();
   }
   if (tab === 'comms') {
+    // Tab Team Comms dibuka: bersihkan penanda pesan belum terbaca.
+    const dot = $('comms-unread-dot');
+    if (dot) dot.classList.add('hidden');
     renderChatFeed();
   }
 }
@@ -573,13 +622,22 @@ function updatePushAgentSelect() {
   if (!sel) return;
   const current = sel.value;
   sel.innerHTML = '';
-  state.nodes.forEach((node) => {
-    if (String(node.role || '').toUpperCase() === 'AGENT') {
-      const o = document.createElement('option');
-      o.value = node.agentId || '';
-      o.textContent = escapeText(node.agentId);
-      sel.appendChild(o);
-    }
+  const sorted = state.nodes
+    .filter((node) => String(node.role || '').toUpperCase() === 'AGENT')
+    .sort((a, b) => {
+      const sa = String(a.status || '').toUpperCase();
+      const sb = String(b.status || '').toUpperCase();
+      const rank = (s) => (s === 'ONLINE' ? 0 : s === 'OFFLINE' ? 1 : 2);
+      const ra = rank(sa);
+      const rb = rank(sb);
+      if (ra !== rb) return ra - rb;
+      return String(a.agentId || '').localeCompare(String(b.agentId || ''));
+    });
+  sorted.forEach((node) => {
+    const o = document.createElement('option');
+    o.value = node.agentId || '';
+    o.textContent = escapeText((node.agentId || '') + ' (' + (node.status || 'ONLINE') + ')');
+    sel.appendChild(o);
   });
   if (current && [...sel.options].some((o) => o.value === current)) {
     sel.value = current;
@@ -702,9 +760,12 @@ async function handleFileUpload() {
   let status = 0;
   try {
     const body = await file.arrayBuffer();
+    const token = (typeof sessionStorage !== 'undefined') ? sessionStorage.getItem('nm_sid') : null;
+    const headers = { 'Content-Type': 'application/octet-stream', 'X-Filename': file.name };
+    if (token) headers['X-Session-Token'] = token;
     const res = await fetch('/api/files/upload', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream', 'X-Filename': file.name },
+      headers: headers,
       body: body,
       credentials: 'same-origin'
     });
@@ -741,12 +802,12 @@ async function handleFilePush() {
   if (res.ok && res.data && res.data.line) {
     appendPushStatus(res.data.line);
   } else {
-    appendPushStatus('Push gagal: ' + ((res.data && res.data.message) || 'tidak diketahui'));
+    appendPushStatus('Push gagal: ' + formatWebError(res.data && res.data.message, agent));
   }
 }
 
-function appendDiagnosticsLog(text) {
-  const out = $('diag-exec-output');
+function appendDiagnosticsLog(text, targetId) {
+  const out = $(targetId || 'diag-exec-output');
   if (!out) return;
   const ts = formatTime(new Date().toISOString());
   const line = '[' + ts + '] ' + String(text);
@@ -780,7 +841,7 @@ async function diagSysinfo() {
       lines.push(formatSysinfoLabel(entry[0]) + ': ' + escapeText(entry[1]));
     });
   } else {
-    lines.push('SYSINFO gagal: ' + escapeText((res.data && res.data.message) || 'tidak diketahui'));
+    lines.push('SYSINFO gagal: ' + formatWebError(res.data && res.data.message, agent));
   }
   if (out) out.textContent = lines.join('\n');
 }
@@ -788,7 +849,7 @@ async function diagSysinfo() {
 async function diagExec() {
   const sel = $('diag-agent');
   const agent = sel ? sel.value : '';
-  const command = $('diag-exec-command').value.trim();
+  const command = $('diag-exec-cmd').value.trim();
   if (!agent) {
     appendDiagnosticsLog('Pilih Agent target terlebih dahulu.');
     return;
@@ -802,22 +863,22 @@ async function diagExec() {
     let text = res.data.line.replace(/^200 EXEC [^ ]+ /, '').replace(/\\n/g, '\n');
     appendDiagnosticsLog(text || '(kosong)');
   } else {
-    appendDiagnosticsLog('EXEC gagal: ' + escapeText((res.data && res.data.message) || 'tidak diketahui'));
+    appendDiagnosticsLog('EXEC gagal: ' + formatWebError(res.data && res.data.message, agent));
   }
 }
 
 async function diagPing() {
-  const host = $('diag-ping-host').value.trim();
+  const host = $('diag-host').value.trim();
   if (!host) return;
   const res = await api('/api/diagnostics/ping', { method: 'POST', body: { host } });
-  appendDiagnosticsLog('PING ' + escapeText(host) + ' -> ' + escapeText((res.data && res.data.line) || (res.data && res.data.message) || 'gagal'));
+  appendDiagnosticsLog('PING ' + escapeText(host) + ' -> ' + (res.data && res.data.line || (res.data && res.data.message || 'gagal')), 'diag-server-output');
 }
 
 async function diagResolve() {
-  const domain = $('diag-resolve-domain').value.trim();
+  const domain = $('diag-domain').value.trim();
   if (!domain) return;
   const res = await api('/api/diagnostics/resolve', { method: 'POST', body: { domain } });
-  appendDiagnosticsLog('RESOLVE ' + escapeText(domain) + ' -> ' + escapeText((res.data && res.data.line) || (res.data && res.data.message) || 'gagal'));
+  appendDiagnosticsLog('RESOLVE ' + escapeText(domain) + ' -> ' + (res.data && res.data.line || (res.data && res.data.message || 'gagal')), 'diag-server-output');
 }
 
 function appendLog(d) {
@@ -947,10 +1008,21 @@ function updateChatTarget() {
   if (!sel) return;
   const current = sel.value;
   sel.innerHTML = '<option value="ALL">ALL (Broadcast)</option>';
-  state.nodes.forEach((node) => {
+  const sorted = state.nodes
+    .filter((node) => String(node.role || '').toUpperCase() === 'AGENT')
+    .sort((a, b) => {
+      const sa = String(a.status || '').toUpperCase();
+      const sb = String(b.status || '').toUpperCase();
+      const rank = (s) => (s === 'ONLINE' ? 0 : s === 'OFFLINE' ? 1 : 2);
+      const ra = rank(sa);
+      const rb = rank(sb);
+      if (ra !== rb) return ra - rb;
+      return String(a.agentId || '').localeCompare(String(b.agentId || ''));
+    });
+  sorted.forEach((node) => {
     const o = document.createElement('option');
     o.value = node.agentId || '';
-    o.textContent = (node.agentId || '') + ' (' + (node.role || '') + ')';
+    o.textContent = escapeText((node.agentId || '') + ' (' + (node.status || 'ONLINE') + ')');
     sel.appendChild(o);
   });
   if (current && [...sel.options].some((o) => o.value === current)) {
@@ -969,7 +1041,7 @@ async function sendAgentReply() {
     appendAgentMessage({ type: 'message', sender: 'YOU -> ' + target, content: message, timestamp: new Date().toISOString() });
     setInlineStatus('agent-reply-status', true, '');
   } else {
-    const reason = (res.data && res.data.message) || 'Gagal mengirim pesan';
+    const reason = formatWebError(res.data && res.data.message, target);
     appendLog({ level: 'ERROR', line: reason, timestamp: new Date().toISOString() });
     setInlineStatus('agent-reply-status', false, reason);
   }
@@ -987,7 +1059,7 @@ async function sendChat() {
     renderChatFeed();
     setInlineStatus('chat-status', true, '');
   } else {
-    const reason = (res.data && res.data.message) || 'Gagal mengirim pesan';
+    const reason = formatWebError(res.data && res.data.message, target);
     appendLog({ level: 'ERROR', line: reason, timestamp: new Date().toISOString() });
     setInlineStatus('chat-status', false, reason);
   }
@@ -1018,6 +1090,18 @@ function connectStream() {
     if (d && d.sender && !isSelfSenderLabel(d.sender)) state.knownRecipients.add(d.sender);
     if (state.role === 'AGENT') updateAgentRecipients();
     state.messages.push(d);
+    // Tampilkan penanda pesan baru bila pengirim bukan user sendiri dan tab aktif bukan Team Comms.
+    const unreadDot = $('comms-unread-dot');
+    if (unreadDot) {
+      const comms = $('ws-comms');
+      const commsActive = comms ? !comms.classList.contains('hidden') : true;
+      const sender = d && d.sender ? String(d.sender).trim() : '';
+      const me = state.username ? String(state.username).trim() : '';
+      const senderIsSelf = !sender || sender === me || isSelfSenderLabel(sender);
+      if (!commsActive && !senderIsSelf) {
+        unreadDot.classList.remove('hidden');
+      }
+    }
     if (state.role === 'AGENT') {
       appendAgentMessage(d);
     } else {
@@ -1175,6 +1259,23 @@ document.addEventListener('DOMContentLoaded', () => {
   if (ds) ds.addEventListener('click', diagSysinfo);
   const dx = $('diag-exec-btn');
   if (dx) dx.addEventListener('click', diagExec);
+
+  // Dukungan Enter keypad pada input PING / RESOLVE
+  const hostInput = $('diag-host');
+  if (hostInput) hostInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); diagPing(); }
+  });
+  const domainInput = $('diag-domain');
+  if (domainInput) domainInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); diagResolve(); }
+  });
+
+  // Dukinkan Enter pada input Remote Command
+  const execInput = $('diag-exec-cmd');
+  if (execInput) execInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); diagExec(); }
+  });
+
   document.querySelectorAll('.ws-tab').forEach((b) => {
     b.addEventListener('click', () => showWorkspaceTab(b.dataset.tab));
   });
