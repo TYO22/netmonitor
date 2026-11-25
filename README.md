@@ -9,6 +9,7 @@
 ---
 
 ## Gambaran Umum
+
 NetMonitor Enterprise adalah aplikasi client-server berbasis Java (JDK 21, pustaka Google Gson 2.15.0) untuk memantau dan mengelola sekumpulan node (Agent) dari satu titik kendali (Inspector). Skenario proyek adalah *Remote Server Cluster & Resource Inspector*, di mana Inspector dapat mengelola banyak node Agent yang tersebar melalui protokol TCP kustom, transfer berkas biner, telemetri UDP real-time, dan operasi jarak jauh.
 
 Aplikasi terdiri dari dua peran utama:
@@ -20,16 +21,16 @@ Aplikasi terdiri dari dua peran utama:
 ## Arsitektur & Fitur Utama Sistem
 
 ### 1. Lapisan Server (`src/netmonitor/server/`)
-- **NetMonitorServer** — Titik masuk server. Membuka `ServerSocket` TCP port 9090, thread pool tetap `50` (`Executors.newFixedThreadPool`), penghitung atomik `activeClients`, scheduler heartbeat, GeoIP lookup, dan layanan data-channel port 9092.
+- **NetMonitorServer** — Titik masuk server. Membuka `ServerSocket` TCP port 9090, thread pool tetap 50 (`Executors.newFixedThreadPool`), penghitung atomik `activeClients`, scheduler heartbeat, GeoIP lookup, dan layanan data-channel port 9092.
 - **ClientHandler** (`implements Runnable`) — Melayani satu klien per thread: dispatcher perintah (`LOGIN`, `LIST`, `SYSINFO`, `PING`, `RESOLVE`, `BROADCAST`, `MSG`, `EXEC`, `SUBSCRIBE`, `UNSUBSCRIBE`, `WATCH`, `UPLOAD`, `PUSH`, `QUIT`), validasi, dan delegasi ke service terkait.
 - **AuthService** — Otentikasi kredensial dari `users.properties`, pengecekan batas 3 kali login gagal, timeout pre-login 30 detik.
 - **GeoIpService** — REST API client ke ip-api.com melalui `HttpURLConnection`. JSON hasil dideserialisasi ke `GeoLocationDTO` menggunakan Google Gson. Field `region` dipetakan dari kunci JSON `regionName`. Untuk status 4xx/5xx, body kesalahan dibaca dari `getErrorStream()`.
-- **TelemetryService** — `DatagramSocket` port UDP 9091 (konfigurasi via `-Dnetmonitor.udp.port`). Menerima datagram metrik dari Agent, deteksi *stale* via ambang `-Dnetmonitor.telemetry.staleMs` (default 30000 ms), fan-out unik ke Inspector yang `SUBSCRIBE`.
-- **DataTransferService** — Kanal TCP terpisah port 9092 (konfigurasi via `-Dnetmonitor.data.port`). Transfer berkas biner dengan *chunking* 8192 byte (8 KB), header metadata (`writeUTF nama` + `writeLong ukuran`), dan `shutdownOutput()` tanpa menutup soket kontrol. Otorisasi lewat token sekali pakai (`ConcurrentHashMap` + `AtomicBoolean`).
+- **TelemetryService** — `DatagramSocket` port UDP 9091 (konfigurasi via `-Dnetmonitor.udp.port`). Menerima datagram metrik dari Agent, deteksi stale via ambang `-Dnetmonitor.telemetry.staleMs` (default 30000 ms), fan-out unik ke Inspector yang `SUBSCRIBE`.
+- **DataTransferService** — Kanal TCP terpisah port 9092 (konfigurasi via `-Dnetmonitor.data.port`). Transfer berkas biner dengan chunking 8192 byte (8 KB), header metadata (`writeUTF nama` + `writeLong ukuran`), dan `shutdownOutput()` tanpa menutup soket kontrol. Otorisasi lewat token sekali pakai (`ConcurrentHashMap` + `AtomicBoolean`).
 
 ### 2. Mesin Klien (`src/netmonitor/client/`)
-- **ClientEngine** — Mesin jaringan tanpa UI. Dipakai bersama `ConsoleClientUI` (CLI) dan `WebBridgeServer` (Web GUI). Menjalankan *Background Receiver Thread* untuk pesan push (`BCAST`/`MSG`) secara asinkron.
-- **ClientListener** — Antarmuka kejadian mesin→tampilan: `onInfo`, `onError`, `onConnected`, `onServerMessage`, `onConnectionLost`, `onTelemetry`, `onTransferProgress`. Semua keluaran log lewat antarmuka ini agar siap digunakan CLI maupun Web GUI.
+- **ClientEngine** — Mesin jaringan tanpa UI. Dipakai bersama `ConsoleClientUI` (CLI) dan `WebBridgeServer` (Web GUI). Menjalankan Background Receiver Thread untuk pesan push (`BCAST`/`MSG`) secara asinkron.
+- **ClientListener** — Antarmuka kejadian mesin-tampilan: `onInfo`, `onError`, `onConnected`, `onServerMessage`, `onConnectionLost`, `onTelemetry`, `onTransferProgress`. Semua keluaran log lewat antarmuka ini agar siap digunakan CLI maupun Web GUI.
 - **NetMonitorClient** — `main` tipis: `ConsoleClientUI.promptConfig` → `ConsoleClientUI.run`.
 
 ### 3. Util & DTO
@@ -40,12 +41,12 @@ Aplikasi terdiri dari dua peran utama:
 ### 4. Telemetri UDP & Heartbeat
 - Agent mengirim paket metrik CPU/Memori berkala (±2 detik) melalui `DatagramPacket` ke port 9091.
 - Inspector `SUBSCRIBE` ke port UDP lokal; server meneruskan fan-out melalui socket UDP utama (unicast, bukan socket baru).
-- Mekanisme *retransmisi* hanya untuk datagram kontrol `HELLO` (maks 3x, ACK timeout 500 ms); telemetri toleran hilang paket (deteksi celah lewat nomor urut).
+- Mekanisme retransmisi hanya untuk datagram kontrol `HELLO` (maks 3x, ACK timeout 500 ms); telemetri toleran hilang paket (deteksi celah lewat nomor urut).
 - Perintah `WATCH` menampilkan metrik terakhir seluruh Agent, menandai status `STALE` bila melewati batas staleMs.
 
 ### 5. Web GUI (`web/` & `src/netmonitor/web/`)
 - **NetMonitorWebClient** — Entry point peluncur Web GUI. Menjalankan `WebBridgeServer` pada port lokal (bawaan 8080, auto-increment bila port sudah dipakai) lalu mencetak URL browser.
-- **WebBridgeServer** — Jembatan HTTP (`com.sun.net.httpserver.HttpServer` JDK) + Gson + SSE (Server-Sent Events). Semua operasi I/O soket dijalankan di *background thread* terpisah dari HTTP handler, sehingga UI browser tidak *freeze*. Server tetap mencetak log aktivitas di konsol terminal.
+- **WebBridgeServer** — Jembatan HTTP (`com.sun.net.httpserver.HttpServer` JDK) + Gson + SSE (Server-Sent Events). Semua operasi I/O soket dijalankan di background thread terpisah dari HTTP handler, sehingga UI browser tidak freeze. Server tetap mencetak log aktivitas di konsol terminal.
 - **Endpoint REST & SSE:**
   - `GET /api/state` — Status sesi (terhubung, peran, username, nodes, stagedFiles, receivedFiles, receivedFilesDetail).
   - `POST /api/login` — Login (host, port, username, password) → buat `ClientEngine`.
@@ -66,7 +67,7 @@ Aplikasi terdiri dari dua peran utama:
 
 ## Struktur Direktori Repositori (berkas terlacak Git)
 
-Berikut pohon direktori hanya berkas yang terlacak di Git (output `git ls-files`):
+Berikut pohon direktori berkas yang terlacak di Git (output `git ls-files`):
 
 ```
 .gitignore
@@ -181,34 +182,23 @@ java -cp out netmonitor.client.NetMonitorClient localhost 9090 AGENT agent01 age
 
 4. **Transfer file patch (PUSH):** Dari tab **Patch & File Transfer**: pilih berkas → **Upload** ke staging. Pilih berkas staged, pilih target Agent, klik **Push to Agent**. Berkas tiba di folder tujuan agent dengan ukuran verifikasi.
 
-5. **Komunikasi tim (Team Comms):** Dari tab **Team Comms**: kirim **BROADCAST** yang diterima semua klien (indikator lingkaran hijau *unread dot* muncul). Kirim **pesan privat** ke `admin` dari Agent; respons muncul di INSPECTOR.
+5. **Komunikasi tim (Team Comms):** Dari tab **Team Comms**: kirim **BROADCAST** yang diterima semua klien (indikator lingkaran hijau unread dot muncul). Kirim pesan privat ke `admin` dari Agent; respons muncul di INSPECTOR.
 
 6. **Fault Tolerance:** Tutup tab Agent secara mendadak. Status di tabel **Systems** berubah menjadi `OFFLINE`. Coba akses `SYSINFO` ke Agent OFFLINE → pesan error informatif: `Agent "agent02" sedang OFFLINE atau tidak terhubung ke server`. Login ulang Agent → status kembali `ONLINE`.
 
 ---
 
-## Dokumentasi Terkait
+## Catatan Konfigurasi
 
-Berkas dokumentasi resmi yang terdapat di repository:
-
-| Berkas | Deskripsi |
-|---|---|
-| `README.md` | Dokumentasi ini (struktur, arsitektur, panduan kompilasi, alur kerja) |
-
-> **Catatan:** Saat ini belum tersedia berkas dokumentasi tambahan yang terlacak di Git selain `README.md` ini. Panduan pembangunan/proyek akademik tersedia sebagai referensi lokal namun **tidak terlacak** di Git.
-
----
-
-## Referensi Tambahan
+Berkas konfigurasi akun (`users.properties`) bersifat opsional; jika tidak ada, akun bawaan digunakan (`admin/admin123` INSPECTOR, `agent01..03/agent123` AGENT).
 
 Hanya komponen berikut yang merupakan referensi inti repositori:
-
 - **`src/netmonitor/...`** — Kode sumber Java (tiga lapisan utama: client, server, web).
 - **`web/`** — Antarmuka Web GUI (HTML5, CSS3, ES6+ JavaScript murni; tanpa Node.js, npm, bundler, atau CDN).
 - **`lib/gson-2.15.0.jar`** — Satu-satunya pustaka eksternal. Semua kode Java murni JDK SE.
 - **`README.md`** — Dokumentasi ini.
 
-> **Catatan konfigurasi:** Berkas konfigurasi akun bersifat opsional (default akun bawaan: `admin/admin123` INSPECTOR, `agent01..03/agent123` AGENT). Komponen yang tidak terlacak tidak ditampilkan di dokumentasi ini.
+Komponen yang tidak terlacak tidak ditampilkan di dokumentasi ini.
 
 ---
 *Final Project — Kelompok 2, Pemrograman Jaringan [TIS31263]*
