@@ -712,7 +712,7 @@ public class ClientHandler implements Runnable {
             log.warn("RES tak dikenal dari " + describe());
             return;
         }
-        f.complete(parts.length == 3 ? Protocol.clean(parts[2], 512) : "");
+        f.complete(parts.length == 3 ? Protocol.clean(parts[2], 4096) : "");
     }
 
     /**
