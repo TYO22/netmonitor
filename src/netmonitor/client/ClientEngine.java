@@ -70,6 +70,12 @@ public final class ClientEngine {
     private volatile boolean quitRequested;
     private volatile Connection current;
 
+    /**
+     * Lock khusus untuk men-serialisasi siklus perintah sinkron yang menunggu balasan di antrean
+     * {@code responses} (LIST, EXEC, SYSINFO, PING, RESOLVE, UPLOAD, dll.), sehingga thread polling
+     * (mis. LIST dari WebBridgeServer) tidak bisa berjalan bersamaan dengan EXEC.
+     */
+    private final Object commandLock = new Object();
     // Telemetri UDP: sisi Agent (pengirim) dan sisi Inspector (penerima fan-out).
     private DatagramSocket udpSendSocket;
     private DatagramSocket telemetrySocket;
@@ -210,39 +216,42 @@ public final class ClientEngine {
      * @return hasil perintah (status, baris respons, quitting)
      */
     public Result request(String command) {
-        Connection c = current;
-        if (c == null || c.lost) {
-            return new Result(Result.Status.LOST, null, false);
+        synchronized (commandLock) {
+            Connection c = current;
+            if (c == null || c.lost) {
+                return new Result(Result.Status.LOST, null, false);
+            }
+            String first = command.trim().split("\\s+")[0].toUpperCase();
+            boolean quitting = first.equals("QUIT") || first.equals("EXIT");
+            if (quitting) {
+                c.userQuit = true;
+            }
+            c.responses.clear();
+            c.awaiting = true;
+            try {
+                c.send(command);
+            } catch (IOException e) {
+                c.awaiting = false;
+                c.markLost(describeIo(e));
+                return new Result(Result.Status.LOST, null, quitting);
+            }
+            String resp;
+            try {
+                resp = c.responses.poll(RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return new Result(Result.Status.LOST, null, quitting);
+            } finally {
+                c.awaiting = false;
+            }
+            if (resp == null) {
+                return new Result(Result.Status.TIMEOUT, null, quitting);
+            }
+            if (resp.equals(LOST)) {
+                return new Result(Result.Status.LOST, null, quitting);
+            }
+            return new Result(Result.Status.OK, resp, quitting);
         }
-        String first = command.trim().split("\\s+")[0].toUpperCase();
-        boolean quitting = first.equals("QUIT") || first.equals("EXIT");
-        if (quitting) {
-            c.userQuit = true;
-        }
-        c.awaiting = true;
-        try {
-            c.send(command);
-        } catch (IOException e) {
-            c.awaiting = false;
-            c.markLost(describeIo(e));
-            return new Result(Result.Status.LOST, null, quitting);
-        }
-        String resp;
-        try {
-            resp = c.responses.poll(RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return new Result(Result.Status.LOST, null, quitting);
-        } finally {
-            c.awaiting = false;
-        }
-        if (resp == null) {
-            return new Result(Result.Status.TIMEOUT, null, quitting);
-        }
-        if (resp.equals(LOST)) {
-            return new Result(Result.Status.LOST, null, quitting);
-        }
-        return new Result(Result.Status.OK, resp, quitting);
     }
 
     /**
@@ -255,80 +264,83 @@ public final class ClientEngine {
      * @return hasil perintah (status, baris respons, quitting)
      */
     public Result requestUpload(String command) {
-        Connection c = current;
-        if (c == null || c.lost) {
-            return new Result(Result.Status.LOST, null, false);
-        }
-        String arg = command.trim().substring("UPLOAD".length()).trim();
-        if (arg.isEmpty()) {
-            return new Result(Result.Status.OK, "400 ERR Format: UPLOAD <pathLokal>", false);
-        }
-        boolean suspicious = arg.contains("..");
-        File localFile = new File(arg);
-        if (!suspicious && (!localFile.exists() || !localFile.isFile())) {
-            return new Result(Result.Status.OK, "400 ERR Berkas Lokal Tidak Ditemukan: " + arg, false);
-        }
-        String sendName = suspicious ? arg : localFile.getName();
-        c.awaiting = true;
-        try {
-            c.send("UPLOAD " + sendName);
-        } catch (IOException e) {
-            c.awaiting = false;
-            c.markLost(describeIo(e));
-            return new Result(Result.Status.LOST, null, false);
-        }
-        String tokenLine;
-        try {
-            tokenLine = c.responses.poll(RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            c.awaiting = false;
-            return new Result(Result.Status.LOST, null, false);
-        }
-        if (tokenLine == null || !tokenLine.startsWith("200")) {
-            c.awaiting = false;
-            return new Result(Result.Status.OK, tokenLine == null ? "408 ERR Tidak Ada Respons" : tokenLine, false);
-        }
-        // parse token dan dataPort dari respons, mis. "200 UPLOAD READY token=abc dataPort=9092 filename=x"
-        String token = null;
-        int dataPort = Integer.getInteger("netmonitor.data.port", 9092);
-        for (String tok : tokenLine.split("\\s+")) {
-            if (tok.startsWith("token=")) {
-                token = tok.substring("token=".length());
-            } else if (tok.startsWith("dataPort=")) {
-                try {
-                    dataPort = Integer.parseInt(tok.substring("dataPort=".length()));
-                } catch (NumberFormatException ignored) {
-                    // pakai default
+        synchronized (commandLock) {
+            Connection c = current;
+            if (c == null || c.lost) {
+                return new Result(Result.Status.LOST, null, false);
+            }
+            String arg = command.trim().substring("UPLOAD".length()).trim();
+            if (arg.isEmpty()) {
+                return new Result(Result.Status.OK, "400 ERR Format: UPLOAD <pathLokal>", false);
+            }
+            boolean suspicious = arg.contains("..");
+            File localFile = new File(arg);
+            if (!suspicious && (!localFile.exists() || !localFile.isFile())) {
+                return new Result(Result.Status.OK, "400 ERR Berkas Lokal Tidak Ditemukan: " + arg, false);
+            }
+            String sendName = suspicious ? arg : localFile.getName();
+            c.responses.clear();
+            c.awaiting = true;
+            try {
+                c.send("UPLOAD " + sendName);
+            } catch (IOException e) {
+                c.awaiting = false;
+                c.markLost(describeIo(e));
+                return new Result(Result.Status.LOST, null, false);
+            }
+            String tokenLine;
+            try {
+                tokenLine = c.responses.poll(RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                c.awaiting = false;
+                return new Result(Result.Status.LOST, null, false);
+            }
+            if (tokenLine == null || !tokenLine.startsWith("200")) {
+                c.awaiting = false;
+                return new Result(Result.Status.OK, tokenLine == null ? "408 ERR Tidak Ada Respons" : tokenLine, false);
+            }
+            // parse token dan dataPort dari respons, mis. "200 UPLOAD READY token=abc dataPort=9092 filename=x"
+            String token = null;
+            int dataPort = Integer.getInteger("netmonitor.data.port", 9092);
+            for (String tok : tokenLine.split("\\s+")) {
+                if (tok.startsWith("token=")) {
+                    token = tok.substring("token=".length());
+                } else if (tok.startsWith("dataPort=")) {
+                    try {
+                        dataPort = Integer.parseInt(tok.substring("dataPort=".length()));
+                    } catch (NumberFormatException ignored) {
+                        // pakai default
+                    }
                 }
             }
-        }
-        if (token == null) {
+            if (token == null) {
+                c.awaiting = false;
+                return new Result(Result.Status.OK, "500 ERR Respons Server Tidak Valid", false);
+            }
+            // suspicious path: server menolak di level perintah, tidak ada transfer
+            if (suspicious) {
+                c.awaiting = false;
+                return new Result(Result.Status.OK, tokenLine, false);
+            }
+            // transfer data melalui kanal data
+            try {
+                uploadData(cfg.getHost(), dataPort, token, localFile);
+            } catch (IOException e) {
+                // abaikan; hasil final akan ditentukan oleh respons server
+            }
+            // tunggu baris final dari server
+            String finalLine;
+            try {
+                finalLine = c.responses.poll(RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                c.awaiting = false;
+                return new Result(Result.Status.LOST, null, false);
+            }
             c.awaiting = false;
-            return new Result(Result.Status.OK, "500 ERR Respons Server Tidak Valid", false);
+            return new Result(Result.Status.OK, finalLine == null ? tokenLine : finalLine, false);
         }
-        // suspicious path: server menolak di level perintah, tidak ada transfer
-        if (suspicious) {
-            c.awaiting = false;
-            return new Result(Result.Status.OK, tokenLine, false);
-        }
-        // transfer data melalui kanal data
-        try {
-            uploadData(cfg.getHost(), dataPort, token, localFile);
-        } catch (IOException e) {
-            // abaikan; hasil final akan ditentukan oleh respons server
-        }
-        // tunggu baris final dari server
-        String finalLine;
-        try {
-            finalLine = c.responses.poll(RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            c.awaiting = false;
-            return new Result(Result.Status.LOST, null, false);
-        }
-        c.awaiting = false;
-        return new Result(Result.Status.OK, finalLine == null ? tokenLine : finalLine, false);
     }
 
     /**

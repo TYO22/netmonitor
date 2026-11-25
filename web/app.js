@@ -860,6 +860,10 @@ async function diagExec() {
   }
   const res = await api('/api/diagnostics/exec', { method: 'POST', body: { agentId: agent, command } });
   if (res.ok && res.data && res.data.line) {
+    if (!res.data.line.startsWith('200 EXEC ')) {
+      appendDiagnosticsLog('EXEC gagal: respons server tidak sesuai format EXEC (' + formatWebError(res.data.line, agent) + ')');
+      return;
+    }
     let text = res.data.line.replace(/^200 EXEC [^ ]+ /, '').replace(/\\n/g, '\n');
     appendDiagnosticsLog(text || '(kosong)');
   } else {
