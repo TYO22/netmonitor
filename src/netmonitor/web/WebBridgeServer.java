@@ -16,13 +16,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import netmonitor.client.ClientConfig;
 import netmonitor.client.ClientEngine;
@@ -39,12 +44,25 @@ public class WebBridgeServer {
 
     private static final int MAX_PORT_TRIES = 25;
     private static final long AGENT_LOGIN_TIMEOUT_MS = 20_000L;
+    /** Masa tunggu sebelum sesi ditutup bila tidak ada tab SSE aktif setelah putus. */
+    private static final long SSE_GRACE_MS = 5_000L;
+    /** Interval pengirim komentar keep-alive SSE agar putusnya tab cepat terdeteksi. */
+    private static final long SSE_PING_INTERVAL_MS = 2_000L;
+    /** Jeda singkat agar server melepas username sebelum login baru mencoba masuk. */
+    private static final long STALE_SESSION_CLOSE_DELAY_MS = 250L;
 
     private final HttpServer server;
     private final int port;
     private final Gson gson = new Gson();
     private final Map<String, WebSession> sessions = new ConcurrentHashMap<>();
     private final Path webRoot;
+    /** Executor daemon untuk cleanup SSE grace period dan penutupan sesi lama. */
+    private final java.util.concurrent.ScheduledExecutorService cleanupExecutor =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "netmonitor-sse-cleanup");
+                t.setDaemon(true);
+                return t;
+            });
 
     /**
      * Membuat server HTTP pada port yang diminta (auto-increment bila terpakai).
@@ -85,6 +103,11 @@ public class WebBridgeServer {
             closeSession(s, true);
         }
         server.stop(1);
+        try {
+            cleanupExecutor.shutdownNow();
+        } catch (Exception ignored) {
+            // abaikan
+        }
     }
 
     private void registerContexts() {
@@ -103,6 +126,7 @@ public class WebBridgeServer {
         server.createContext("/api/files/upload", this::handleFilesUpload);
         server.createContext("/api/files/push", this::handleFilesPush);
         server.createContext("/api/chat/send", this::handleChatSend);
+        server.createContext("/api/recipients", this::handleRecipients);
     }
 
     // ------------------------------------------------------------------ static files
@@ -201,35 +225,38 @@ public class WebBridgeServer {
         }
     }
 
-    private String getCookieSid(HttpExchange ex) {
-        List<String> cookies = ex.getRequestHeaders().get("Cookie");
-        if (cookies == null) {
-            return null;
-        }
-        for (String c : cookies) {
-            for (String part : c.split(";")) {
-                String t = part.trim();
-                if (t.startsWith("sid=")) {
-                    return t.substring(4);
+    /**
+     * Mengambil sesi dari permintaan HTTP. Autentikasi sepenuhnya per-tab:
+     * hanya header {@code X-Session-Token} dan query parameter {@code ?sid=}
+     * (untuk SSE {@code /api/stream} yang tidak dapat mengirim header).
+     * Tidak ada fallback Cookie agar tab baru selalu mulai belum login.
+     *
+     * @param ex pertukaran HTTP
+     * @return sesi yang cocok, atau {@code null} bila token tidak ada/tidak valid
+     */
+    private WebSession sessionFromRequest(HttpExchange ex) {
+        // 1) Prioritas: header X-Session-Token (isolasi per-tab)
+        String sid = ex.getRequestHeaders().getFirst("X-Session-Token");
+        // 2) Query parameter ?sid= (untuk SSE /api/stream yang tidak bisa set header)
+        if (sid == null || sid.trim().isEmpty()) {
+            try {
+                String query = ex.getRequestURI().getQuery();
+                if (query != null) {
+                    for (String part : query.split("&")) {
+                        if (part.startsWith("sid=")) {
+                            sid = java.net.URLDecoder.decode(part.substring(4), java.nio.charset.StandardCharsets.UTF_8);
+                            break;
+                        }
+                    }
                 }
+            } catch (Exception ignored) {
+                // query tidak valid: anggap tanpa token
             }
         }
-        return null;
-    }
-
-    private WebSession sessionFromRequest(HttpExchange ex) {
-        String sid = getCookieSid(ex);
-        if (sid == null) {
+        if (sid == null || sid.trim().isEmpty()) {
             return null;
         }
-        return sessions.get(sid);
-    }
-
-    private void setSessionCookie(HttpExchange ex, String sid, boolean clear) {
-        String value = clear
-                ? "sid=; Path=/; Max-Age=0; SameSite=Lax"
-                : "sid=" + sid + "; Path=/; SameSite=Lax";
-        ex.getResponseHeaders().add("Set-Cookie", value);
+        return sessions.get(sid.trim());
     }
 
     // ------------------------------------------------------------------ /api/state
@@ -310,43 +337,92 @@ public class WebBridgeServer {
         }
 
         ClientConfig cfg = new ClientConfig(host, port, role, username, password);
-        WebListener listener = new WebListener();
-        ClientEngine engine = new ClientEngine(cfg, listener);
-        WebSession session = new WebSession(UUID.randomUUID().toString(), cfg, engine, listener);
 
-        boolean ok;
-        String message;
-        if (cfg.isAgent()) {
-            CountDownLatch latch = new CountDownLatch(1);
-            listener.setLoginLatch(latch, session);
-            session.agentThread = new Thread(() -> engine.runAgent(), "web-agent-" + username);
-            session.agentThread.setDaemon(true);
-            session.agentThread.start();
-            try {
-                latch.await(AGENT_LOGIN_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        // Klaim otomatis sesi lama yang sudah tidak punya tab aktif (SSE 0).
+        // Sesi lama akan ditutup dan registry dibersihkan sebelum login baru mencoba masuk.
+        WebSession stale = findStaleSessionByUsername(username);
+        if (stale != null) {
+            // Jika sesi lama sudah tidak punya SSE aktif, tutup dulu setelah jeda 250ms
+            // agar NetMonitorServer sempat melepas username-nya.
+            if (stale.sseClients.isEmpty()) {
+                scheduleStaleSessionClose(stale, STALE_SESSION_CLOSE_DELAY_MS);
             }
-            ok = listener.loginSucceeded;
-            message = listener.lastMessage;
-            if (!ok) {
+            // Kalau masih punya SSE aktif, biarkan saja dan biarkan percobaan login
+            // berikutnya menangani username bentrok (retry loop di bawah).
+        }
+
+        WebSession session = null;
+        boolean ok = false;
+        String message = null;
+        // Retry otomatis hingga 3 kali (total 4 percobaan) bila server masih membersihkan
+        // sesi lama (status 400 "Username Sudah Ada" / "sedang dipakai").
+        for (int attempt = 0; attempt < 1 && !ok; attempt++) {
+            if (attempt > 0) {
                 try {
-                    engine.requestQuit();
-                } catch (Exception ignored) {
-                    // abaikan
-                }
-                try {
-                    session.agentThread.join(3000);
-                } catch (InterruptedException ignored) {
+                    Thread.sleep(400);
+                } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                 }
             }
-        } else {
-            listener.setLoginLatch(null, session);
-            ok = engine.connect();
-            message = ok ? listener.lastMessage : listener.lastError;
-            if (message == null || message.isEmpty()) {
-                message = ok ? "Login berhasil" : "Login gagal";
+            WebListener listener = new WebListener();
+            ClientEngine engine = new ClientEngine(cfg, listener);
+            WebSession sess = new WebSession(UUID.randomUUID().toString(), cfg, engine, listener);
+
+            boolean attemptOk;
+            String attemptMsg;
+            if (cfg.isAgent()) {
+                CountDownLatch latch = new CountDownLatch(1);
+                listener.setLoginLatch(latch, sess);
+                sess.agentThread = new Thread(() -> engine.runAgent(), "web-agent-" + username);
+                sess.agentThread.setDaemon(true);
+                sess.agentThread.start();
+                try {
+                    latch.await(AGENT_LOGIN_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                attemptOk = listener.loginSucceeded;
+                attemptMsg = listener.lastMessage;
+                if (!attemptOk) {
+                    try {
+                        engine.requestQuit();
+                    } catch (Exception ignored) {
+                        // abaikan
+                    }
+                    try {
+                        sess.agentThread.join(3000);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            } else {
+                listener.setLoginLatch(null, sess);
+                attemptOk = engine.connect();
+                attemptMsg = attemptOk ? listener.lastMessage : listener.lastError;
+                if (attemptMsg == null || attemptMsg.isEmpty()) {
+                    attemptMsg = attemptOk ? "Login berhasil" : "Login gagal";
+                }
+            }
+
+            if (attemptOk) {
+                sess.connected = true;
+                if (attemptMsg == null || attemptMsg.isEmpty()) {
+                    attemptMsg = "Login berhasil";
+                }
+                session = sess;
+                ok = true;
+                message = attemptMsg;
+                break;
+            }
+            message = attemptMsg;
+            try {
+                engine.close();
+            } catch (Exception ignored) {
+                // abaikan
+            }
+            // hanya retry bila kegagalan karena username masih dalam proses cleanup
+            if (message == null || !message.contains("sedang dipakai")) {
+                break;
             }
         }
 
@@ -359,12 +435,14 @@ public class WebBridgeServer {
             message = "Login berhasil";
         }
         sessions.put(session.id, session);
-        setSessionCookie(ex, session.id, false);
+        // Token sesi hanya dikirim di body JSON "sid" (header X-Session-Token di sisi
+        // browser); tidak ada Set-Cookie agar tab baru selalu mulai belum login.
         sendJson(ex, 200, mapOf(
                 "ok", true,
                 "message", message,
                 "role", cfg.getRole(),
-                "username", cfg.getUsername()
+                "username", cfg.getUsername(),
+                "sid", session.id
         ));
     }
 
@@ -379,11 +457,13 @@ public class WebBridgeServer {
         if (s != null) {
             closeSession(s, false);
         }
-        setSessionCookie(ex, "", true);
+        // Tidak ada Set-Cookie: token dihapus sisi browser (sessionStorage) per-tab.
         sendJson(ex, 200, mapOf("ok", true, "message", "Logout berhasil"));
     }
 
     private void closeSession(WebSession s, boolean silent) {
+        // Batalkan task cleanup yang mungkin masih tertunda agar tidak dobel.
+        cancelSseCleanup(s);
         sessions.remove(s.id);
         s.connected = false;
         try {
@@ -399,6 +479,8 @@ public class WebBridgeServer {
         } catch (Exception ignored) {
             // abaikan
         }
+        // Tidak perlu delay: server sudah membebaskan sesi secara atomik sebelum BYE (ClientHandler).
+        // Tetap lanjutkan unsubscribe/close di bawah.
         try {
             if (!s.cfg.isAgent()) {
                 s.engine.unsubscribeTelemetry();
@@ -427,6 +509,88 @@ public class WebBridgeServer {
             }
             s.sseClients.remove(os);
         }
+    }
+
+    // ------------------------------------------------------------------ SSE cleanup helpers
+
+    /** Membatalkan scheduled task cleanup SSE untuk sesi tertentu. */
+    private void cancelSseCleanup(WebSession s) {
+        ScheduledFuture<?> f = s.sseCleanupTask;
+        s.sseCleanupTask = null;
+        if (f != null) {
+            f.cancel(false);
+        }
+    }
+
+    /**
+     * Menjadwalkan tugas cleanup setelah grace period 5 detik bila tidak ada tab SSE aktif.
+     * Tugas ini menutup ClientEngine dan menghapus sesi dari registry agar NetMonitorServer
+     * menandai agent OFFLINE.
+     *
+     * @param s sesi yang akan di-cleanup jika masih tanpa klien aktif setelah grace period
+     */
+    private void scheduleSseCleanup(WebSession s) {
+        cancelSseCleanup(s);
+        if (!s.sseClients.isEmpty()) {
+            // Masih ada klien aktif (misalnya browser baru connect di saat terakhir)
+            return;
+        }
+        s.sseCleanupTask = cleanupExecutor.schedule(() -> {
+            WebSession current = sessions.get(s.id);
+            if (current == null) {
+                // Sesi sudah dihapus oleh proses lain (misalnya logout)
+                return;
+            }
+            // Verifikasi sekali lagi: jika ada klien SSE baru selama grace period, hentikan cleanup
+            if (!current.sseClients.isEmpty()) {
+                return;
+            }
+            // 5 detik berlalu tanpa tab aktif: tutup sesi (engine disconnect) agar server tandai OFFLINE
+            closeSession(current, true);
+        }, SSE_GRACE_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /** Mencari sesi lama yang memiliki username sama tetapi sudah tidak punya tab aktif (SSE 0). */
+    private WebSession findStaleSessionByUsername(String username) {
+        if (username == null) {
+            return null;
+        }
+        for (WebSession s : sessions.values()) {
+            if (s == null || s.cfg == null) {
+                continue;
+            }
+            String u = s.cfg.getUsername();
+            if (username.equalsIgnoreCase(u)) {
+                // Cek apakah sesi ini sudah tidak punya tab SSE aktif
+                if (s.sseClients.isEmpty()) {
+                    return s;
+                }
+                // Jika masih ada SSE aktif, sesi ini masih terpakai — bukan kandidat
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Menjadwalkan penutupan sesi lama yang tidak lagi punya tab aktif (mendukung klaim otomatis).
+     * Memberi jeda singkat agar NetMonitorServer melepas username sebelum login baru mencoba.
+     */
+    private void scheduleStaleSessionClose(WebSession stale, long delayMs) {
+        // Jika sudah terjadwal task sebelumnya, hentikan dulu
+        cancelSseCleanup(stale);
+        cleanupExecutor.schedule(() -> {
+            // Verifikasi ulang: sesi masih ada dan tetap tidak punya tab aktif
+            WebSession current = sessions.get(stale.id);
+            if (current == null) {
+                return;
+            }
+            if (!current.sseClients.isEmpty()) {
+                // Ternyata masih ada klien baru yang connect; hentikan cleanup ini
+                return;
+            }
+            // Sesi lama ini sudah tidak punya tab aktif: tutup engine, hapus registry
+            closeSession(current, true);
+        }, delayMs, TimeUnit.MILLISECONDS);
     }
 
     // ------------------------------------------------------------------ /api/nodes
@@ -1002,6 +1166,49 @@ public class WebBridgeServer {
         }
     }
 
+    /**
+     * GET /api/recipients — mengembalikan daftar unik username tujuan.
+     * Dapat diakses oleh sesi INSPECTOR dan AGENT. Menyertakan "admin" +
+     * semua username dari sesi aktif (kecuali username sesi pemanggil itu sendiri).
+     *
+     * @param ex pertukaran HTTP
+     * @return JSON object { ok, line, recipients: [unique username strings] }.
+     */
+    private void handleRecipients(HttpExchange ex) throws IOException {
+        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+            sendJson(ex, 405, mapOf("ok", false, "message", "Method not allowed"));
+            return;
+        }
+        WebSession s = sessionFromRequest(ex);
+        if (s == null) {
+            sendJson(ex, 401, mapOf("ok", false, "message", "Sesi tidak ditemukan"));
+            return;
+        }
+        String myUsername = s.cfg.getUsername();
+        Set<String> candidates = new HashSet<>(Arrays.asList("admin"));
+        // Selalu baca sesi aktif terbaru dari peta sessions (ConcurrentHashMap aman
+        // di iterasi walaupun ada login/logout berjalan di thread lain)
+        for (WebSession ss : sessions.values()) {
+            if (ss == null) {
+                continue;
+            }
+            String role = ss.cfg.getRole();
+            if ("INSPECTOR".equalsIgnoreCase(role) || "AGENT".equalsIgnoreCase(role)) {
+                String u = ss.cfg.getUsername();
+                if (u != null && !u.equals(myUsername)) {
+                    candidates.add(u);
+                }
+            }
+        }
+        List<String> sorted = new ArrayList<>(candidates);
+        Collections.sort(sorted);
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("line", "OK");
+        out.put("recipients", sorted);
+        sendJson(ex, 200, out);
+    }
+
     // ------------------------------------------------------------------ /api/stream (SSE)
 
     private void handleStream(HttpExchange ex) throws IOException {
@@ -1020,29 +1227,35 @@ public class WebBridgeServer {
         h.set("Connection", "keep-alive");
         ex.sendResponseHeaders(200, 0);
         OutputStream os = ex.getResponseBody();
+        // Batalkan scheduled cleanup lama jika ada (misalnya browser kembali / F5)
+        cancelSseCleanup(s);
         s.sseClients.add(os);
         // kirim satu event awal agar klien tahu stream aktif
         writeSse(os, "log", mapOf("level", "INFO", "line", "SSE stream connected", "timestamp", now()));
         try {
             while (true) {
                 // heartbeat komentar agar koneksi tetap hidup dan putus terdeteksi
+                // setiap 2 detik agar IOException browser terdeteksi segera setelah tab ditutup
                 try {
                     os.write(": ping\n\n".getBytes(StandardCharsets.UTF_8));
                     os.flush();
                 } catch (IOException e) {
                     break;
                 }
-                Thread.sleep(15000);
+                Thread.sleep(SSE_PING_INTERVAL_MS);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
+            // Setelah loop terputus, hapus klien dan tutup OutputStream
             s.sseClients.remove(os);
             try {
                 os.close();
             } catch (IOException ignored) {
                 // abaikan
             }
+            // Jadwalkan cleanup grace 5 detik setelah jumlah SSE aktif menjadi 0
+            scheduleSseCleanup(s);
         }
     }
 
@@ -1271,6 +1484,8 @@ public class WebBridgeServer {
         public volatile boolean subscribed;
         public volatile int udpPort;
         public volatile Thread agentThread;
+        /** ScheduledFuture yang menunggu penutupan sesi lama setelah grace period SSE 0. */
+        public volatile ScheduledFuture<?> sseCleanupTask;
         /**
          * Peta agentId -> info node (role, location, isp, status, cpu, ram).
          * Diperbarui oleh handleNodes dan onTelemetry.

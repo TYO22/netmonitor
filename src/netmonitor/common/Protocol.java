@@ -22,7 +22,7 @@ public final class Protocol {
     /** Port TCP bawaan server NetMonitor. */
     public static final int DEFAULT_PORT = 9090;
     /** Batas maksimum panjang satu baris protokol untuk melindungi memori dari input berlebihan. */
-    public static final int MAX_LINE_LENGTH = 1024;
+    public static final int MAX_LINE_LENGTH = 4096;
     /** Penanda akhir baris protokol (CR LF). */
     public static final String EOL = "\r\n";
 

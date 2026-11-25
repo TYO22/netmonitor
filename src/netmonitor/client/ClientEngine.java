@@ -1090,7 +1090,10 @@ public final class ClientEngine {
     /**
      * Mengeksekusi perintah whitelist di sisi Agent (HANYA di ClientEngine/Agent).
      * Eksekusi tanpa shell: nama perintah dipanggil lewat ProcessBuilder langsung.
-     * Output dipotong 4 KB, diencode satu baris (spasi / karakter kontrol → spasi).
+     * Batas output dinaikkan menjadi 2.800 karakter agar info diagnostik seperti
+     * `ipconfig` tampil utuh. Jika output melebihi batas, akhir ditambahkan
+     * penanda {@code ... [output terpotong]}.
+     * Output tetap diencode satu baris (spasi / karakter kontrol → spasi).
      *
      * @param command nama perintah yang sudah divalidasi server-side
      * @return hasil eksekusi (satu baris), atau "ERR <penyebab>" bila gagal
@@ -1114,7 +1117,9 @@ public final class ClientEngine {
                         sb.append("\\n");
                     }
                     sb.append(l);
-                    if (sb.length() >= 4_096) {
+                    if (sb.length() >= 2_800) {
+                        //Tambahkan penanda output terpotong agar info tetap tercantum sebagian
+                        sb.append("... [output terpotong]");
                         break;
                     }
                 }
